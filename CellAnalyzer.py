@@ -344,7 +344,7 @@ class CellAnalyzer:
         self.samples_df["num_cells"] = self.samples_df["num_cells"].astype(int)
 
         # Save the masks, flows, styles and denoised images in the object
-        self.seg_channels = channels
+        self.seg_channels = channels # NOTE: These are 1-indexed
         self.seg_diameter = diameter
         self.masks = new_masks
         self.flows = flows
@@ -382,9 +382,22 @@ class CellAnalyzer:
         self.cells_df.reset_index(drop=True, inplace=True)
         self.cells_df.set_index("cell_id", inplace=True)
 
-    def save_segmentation_imgs(self, folder_name="segmentations", background_channels=None, overwrite=False):
+    def save_segmentation_imgs(self, folder_name="segmentations", background_channels=None, overwrite=False, norm_img=False, norm_perc=1):
         """
         Saves the segmentation results to a file.
+
+        Parameters:
+            folder_name : str
+                The name of the (sub-)folder to save the segmentation results to.
+            background_channels : list of int, optional
+                The channels to use for the background of the outlines. If None, uses segmentation channels.
+            overwrite : bool
+                Whether to overwrite existing files. Default is False.
+            norm_img : bool
+                Whether to normalize the background channels for each image separately. Default is False (normalize over all images).
+            norm_perc : int
+                The percentile to use for normalization of the background channels. Default is 1 (1st and 99th percentile).
+                These percentiles are used as min/max, meaning values outside are clipped.
         """
         # Save the masks, flows, styles and denoised images
         out_folder = self.path / folder_name
@@ -392,40 +405,56 @@ class CellAnalyzer:
         out_folder.mkdir(parents=True, exist_ok=True)
 
         # OUTLINES WITH CHOSEN BACKGOUND CHANNELS
+
         if background_channels is None:
-            background_channels = self.seg_channels
+            bg_channels = [n-1 for n in self.seg_channels]  # Decrease by 1 to make it 0-indexed
         else:
-            background_channels = [n-1 for n in background_channels] # Decrease by 1 to make it 0-indexed
-        # Take the denoised images and add channels such that it's a RGB image
-        for i, img in enumerate(self.projections):
-            outline = self.outlines[i]
+            bg_channels = [n-1 for n in background_channels] # Decrease by 1 to make it 0-indexed
+        if len(bg_channels) > 3:
+            raise ValueError("Number of background channels must be 3 or less (RGB channels together with outlines).")
+        overall_mins, overall_maxs = {}, {}
+        for bg_channel in bg_channels:
+            if bg_channel < 0 or bg_channel >= len(self.projections[0]):
+                raise ValueError(f"Channel {bg_channel+1} is out of bounds for the projections. Available channels: {len(self.projections[0])}.")
+            # overall_mins[bg_channel] = min([img[bg_channel].min() for img in self.projections])
+            # overall_maxs[bg_channel] = max([img[bg_channel].max() for img in self.projections])
+            all_values = np.concatenate([img[bg_channel].ravel() for img in self.projections])
+            overall_mins[bg_channel] = np.percentile(all_values, norm_perc)
+            overall_maxs[bg_channel] = np.percentile(all_values, 100-norm_perc)
+
+        # Take the denoised images and add channels such that it's an RGB image
+        for outline_num, img in enumerate(self.projections):
+            outline = self.outlines[outline_num]
             # Create a new image with 3 channels, to overlay the outlines
             _, h, w = img.shape
             img_rgb = np.zeros((h, w, 3), dtype=np.uint8)
-            for c in range(2):
-                channel = img[c, :, :]
-                np.moveaxis(channel, 0, -1)  # Move the channel axis to the last dimension
-                # Normalize the channel to 0-255
-                channel = (channel - channel.min()) / (channel.max() - channel.min()) * 255
+            for rgb_channel, bg_channel in enumerate(bg_channels):
+                channel = img[bg_channel, :, :]
+                # Normalize the channel to 0-255 over all images (or over the current image if norm_img is True)
+                used_min = overall_mins[bg_channel] if not norm_img else np.percentile(channel, norm_perc)
+                used_max = overall_maxs[bg_channel] if not norm_img else np.percentile(channel, 100-norm_perc)
+                channel = (channel - used_min) / (used_max - used_min) * 255
                 channel = np.clip(channel, 0, 255)
                 channel = channel.astype(np.uint8)
-                img_rgb[:, :, c] = channel  # Copy existing channels
+                img_rgb[:, :, rgb_channel] = channel
             # Add white outlines
-            img_rgb[outline > 0] = [255, 255, 255]  # Set the outline channel to white
+            img_rgb[outline > 0] = [150, 150, 150]  # Set the outline channel to white
 
             # Save the image
             img_rgb = Image.fromarray(img_rgb)
-            img_dir = out_folder / f"{self.samples_df['filename'][i]}_outlines.png"
+            img_dir = out_folder / f"{self.samples_df['filename'][outline_num]}_outlines.png"
             # Check if the file already exists
             if img_dir.exists() and not overwrite:
                 print(f"File {img_dir} already exists. Saving this file was skipped.")
             else:
                 img_rgb.save(img_dir)
-        print(i+1, "outlines saved.")
+
+        print(outline_num+1, "outlines saved.")
         
         # MASKS
-        for i, mask in enumerate(self.masks):
-            new_mask = self.masks[i].copy()
+
+        for outline_num, mask in enumerate(self.masks):
+            new_mask = self.masks[outline_num].copy()
             # Subtract the minimum value, but only where it is not 0
             min_val = mask[mask>0].min()
             new_mask[mask > 0] -= (min_val -1)
@@ -437,13 +466,14 @@ class CellAnalyzer:
             
             # Save the image
             mapped = Image.fromarray(mapped)
-            img_dir = out_folder / f"{self.samples_df['filename'][i]}_masks.png"
+            img_dir = out_folder / f"{self.samples_df['filename'][outline_num]}_masks.png"
             # Check if the file already exists
             if img_dir.exists() and not overwrite:
                 print(f"File {img_dir} already exists. Saving this file was skipped.")
             else:
-                mapped.save(out_folder / f"{self.samples_df['filename'][i]}_masks.png")
-        print(i+1, "masks saved.")
+                mapped.save(out_folder / f"{self.samples_df['filename'][outline_num]}_masks.png")
+
+        print(outline_num+1, "masks saved.")
 
     def calculate_cell_signals(self, channels, dilate=None, mode="mean"):
         """
@@ -473,7 +503,7 @@ class CellAnalyzer:
         elif isinstance(dilate, int):
             dilate = {name: dilate for name in channels.keys()}
         elif not all([k in channels.keys() for k in dilate.keys()]):
-            raise ValueError('dilate must be a list of the same length as channels, or a single int for all channels.')
+            raise ValueError('dilate must be a list of the same length as channels, or a single int to use for all channels.')
 
         cells_df = self.cells_df.copy()
         for name, num in channels.items():
@@ -495,19 +525,24 @@ class CellAnalyzer:
                 for cell_id in range(lowest_non_zero, mask.max()+1):
                     cell_mask = mask == cell_id
                     cell_mask_for_signal = cell_mask.copy()
+                    # Dilate or erode if needed
                     if dilate[name] > 0:
                         cell_mask_for_signal = morphology.binary_dilation(cell_mask_for_signal, morphology.disk(dilate[name]))
                     elif dilate[name] < 0:
                         cell_mask_for_signal = morphology.binary_erosion(cell_mask_for_signal, morphology.disk(-dilate[name]))
+                    # Calculate the mean or median signal for the cell
                     if mode == "mean":
                         cell_signal = np.mean(img[cell_mask_for_signal])
                     elif mode == "median":
                         cell_signal = np.median(img[cell_mask_for_signal])
                     else:
                         raise ValueError(f"Mode '{mode}' not recognized. Check docstring for options.")
+                    # Assign the signal to the cell ID in the dict and mask
+                    if np.isnan(cell_signal):
+                        cell_signal = 0
                     img_signals_dict[cell_id] = cell_signal
                     img_signals_list.append(cell_signal)
-                    img_signals_mask += cell_signal * cell_mask
+                    img_signals_mask += cell_signal * cell_mask # NOTE: use un-altered mask here to have no overlaps between cells
 
                     # Add the signal to the cell_df
                     cells_df.loc[cell_id, name+"_"+mode] = cell_signal
