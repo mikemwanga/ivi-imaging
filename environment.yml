@@ -1,0 +1,18 @@
+name: ca-env
+channels:
+  - conda-forge
+dependencies:
+  - python==3.11
+  - cellpose==3.1
+  - pillow
+  - numpy
+  - scikit-image
+  - matplotlib
+  - pandas
+  - seaborn
+  - aicsimageio
+  - bioformats_jar
+  - ipykernel
+  - pip
+  - pip:
+      - aicsimageio[dv]

@@ -5,13 +5,14 @@
     - Denoising --> no
     - Other filters... --> no
     - Deconvolution ? --> Ben: don't do it...
-    - Convpaint ?
+    - **Convpaint** ?
+    
 - Normalization across samples -> need controls! (otherwise voluntary...)
-    - Possible to acquire background signal within sample (e.g. remove cells from one half) ???
+    - Possible to acquire **background signal** within sample (e.g. remove cells from one half) ???
 
-- (Segmentation --> only if not working properly)
+- Segmentation --> only if not working properly
 
-- Dilation/erosion for mean --> try...
+- **Dilation/erosion** for mean --> try...
 - Alternatives to mean signal (median, functions, filters...) --> mean = usual
 
 - Threshold for binning --> use mocks (avg_ctrl + 3 * sd_ctrl)
