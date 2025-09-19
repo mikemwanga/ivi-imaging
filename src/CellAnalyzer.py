@@ -704,6 +704,10 @@ class CellAnalyzer:
 
         # --- Save legend with all combinations ---
 
+        # Make sure bins are in alphabetical order
+        signal1_bin_nums = {bin_name: i for i, bin_name in enumerate(sorted(self.cells_df[signal1].unique()))}
+        signal2_bin_nums = {bin_name: i for i, bin_name in enumerate(sorted(self.cells_df[signal2].unique()))}
+        # Define levels for each bin
         levels1 = [(i+1)*255//len(signal1_bin_nums) for i in range(len(signal1_bin_nums))]
         levels2 = [(i+1)*255//len(signal2_bin_nums) for i in range(len(signal2_bin_nums))]
 
