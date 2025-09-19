@@ -149,13 +149,15 @@ class CellAnalyzer:
 
         # Regex pattern to extract components
         pattern = re.compile(
+            r'(?P<prefix>[a-zA-Z0-9]+)_'
             r'(?P<condition>[a-zA-Z0-9]+)_'
-            r'(?P<donor>BEC\d+)_'
-            r'(?P<time>\d+h)_'
-            r'(?P<date>\d{2}\.\d{2}\.\d{2})'
-            r'(?:\.(?P<sample>\d+))?_'
-            r'(?P<mode1>[A-Z0-9]+)_'
-            r'(?P<mode2>[A-Z0-9]+)\.dv$'
+            r'(?P<temp>[0-9]+)_'
+            r'(?P<host>[a-zA-Z]+)_'
+            r'(?P<donor>D\d+)_'
+            r'(?P<mag>\d+x)_'
+            r'(?P<time>\d+hpi)_'
+            r'(?P<date>\d{8})_'              # YYYYMMDD format
+            r'(?P<sample>\d+)\.nd2$'
         )
 
         records = []
@@ -605,7 +607,7 @@ class CellAnalyzer:
         else:
             thresh.sort()
             bins = ["negative", "partial", "positive"] if len(thresh) == 2 else [i+1 for i in range(len(thresh)+2)]
-            bin_nums = {bin_name: i+1 for i, bin_name in enumerate(bins)}
+            bin_nums = {bin_name: i+1 for i, bin_name in enumerate(bins)} # Starting at 1
         col_name = col_name if col_name is not None else signal
         self.cells_df[col_name] = bins[0]  # Initialize the column with the first bin
         for thresh, bin_name in zip(thresh, bins[1:]):
@@ -673,14 +675,15 @@ class CellAnalyzer:
         channel1 = 0 if outline_channel != 0 else 1  # Use the red for signal1 if outline is not already defined as red
         channel2 = 1 if (outline_channel != 0 and outline_channel != 1) else 2
 
-        # Create RGB images for the populations
+        # Create RGB images for the populations; e.g. {"negative": 0, "positive": 1}
         signal1_bin_nums = {bin_name: i for i, bin_name in enumerate(self.cells_df[signal1].unique())}
         signal2_bin_nums = {bin_name: i for i, bin_name in enumerate(self.cells_df[signal2].unique())}
         i = 0
         for mask1, mask2, outline in zip(self.bin_masks[signal1], self.bin_masks[signal2], self.outlines):
             img_rgb = np.zeros((*mask1.shape, 3), dtype=np.uint8)
-            img_rgb[:, :, channel1] = mask1 * 255 // (len(signal1_bin_nums))  # Scale to 0-255
-            img_rgb[:, :, channel2] = mask2 * 255 // (len(signal2_bin_nums))  # Scale to 0-255
+            # Note: masks are 1-indexed
+            img_rgb[:, :, channel1] = mask1 * 255 // (len(signal1_bin_nums))  # Scale up to 255 (excluding 0)
+            img_rgb[:, :, channel2] = mask2 * 255 // (len(signal2_bin_nums))  # Scale up to 255 (excluding 0)
             # Add the outlines as the chosen channel
             # outline = morphology.binary_dilation(outline, morphology.disk(1.5))
             img_rgb[outline] = [255, 255, 255] if outline_channel is None else [0, 0, 0]  # Set the outline channel to white or the specified color
@@ -698,6 +701,30 @@ class CellAnalyzer:
             
             i += 1
         print(i, "populations saved.")
+
+        # --- Save legend with all combinations ---
+
+        levels1 = [(i+1)*255//len(signal1_bin_nums) for i in range(len(signal1_bin_nums))]
+        levels2 = [(i+1)*255//len(signal2_bin_nums) for i in range(len(signal2_bin_nums))]
+
+        fig, ax = plt.subplots(figsize=(4, len(signal1_bin_nums)*len(signal2_bin_nums)*0.3))
+        for i1, bin1 in enumerate(signal1_bin_nums):
+            for i2, bin2 in enumerate(signal2_bin_nums):
+                rgb = [0,0,0]
+                rgb[channel1] = levels1[signal1_bin_nums[bin1]]/255
+                rgb[channel2] = levels2[signal2_bin_nums[bin2]]/255
+                ax.add_patch(plt.Rectangle((0, i1*len(signal2_bin_nums)+i2), 1, 1, color=rgb))
+                ax.text(1.1, i1*len(signal2_bin_nums)+i2+0.5, f"{signal1}_{bin1} | {signal2}_{bin2}", va='center')
+
+        ax.set_xlim(0, 4)
+        ax.set_ylim(0, len(signal1_bin_nums)*len(signal2_bin_nums))
+        ax.axis('off')
+        plt.tight_layout()
+        plt.savefig(out_folder / f"{pop_name}_legend.png", dpi=150)
+        plt.close(fig)
+        print(f"Legend saved with matplotlib.")
+
+        print("Folder:", out_folder)
 
 
 #####################################################################################

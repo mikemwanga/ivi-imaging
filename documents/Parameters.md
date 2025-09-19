@@ -7,7 +7,7 @@
     - Deconvolution ? --> Ben: don't do it...
     - **Convpaint** ?
     
-- Normalization across samples -> need controls! (otherwise voluntary...)
+- Normalization across samples -> need controls! (otherwise arbitrary...)
     - Possible to acquire **background signal** within sample (e.g. remove cells from one half) ???
 
 - Segmentation --> only if not working properly
