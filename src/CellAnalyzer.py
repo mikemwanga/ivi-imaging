@@ -132,7 +132,7 @@ class CellAnalyzer:
         self.cellpose_model = denoise.CellposeDenoiseModel(gpu=use_GPU, model_type="cyto3",
                                             restore_type="denoise_cyto3")
         
-    def read_data(self):
+    def read_data(self, old_parsing=False):
         """
         Parses structured microscopy .dv filenames from a given folder and returns a DataFrame
         with extracted metadata.
@@ -148,17 +148,28 @@ class CellAnalyzer:
         filenames = list(input_path.glob("*.dv"))
 
         # Regex pattern to extract components
-        pattern = re.compile(
-            r'(?P<prefix>[a-zA-Z0-9]+)_'
+        if old_parsing:
+            pattern = re.compile(
             r'(?P<condition>[a-zA-Z0-9]+)_'
-            r'(?P<temp>[0-9]+)_'
-            r'(?P<host>[a-zA-Z]+)_'
-            r'(?P<donor>D\d+)_'
-            r'(?P<mag>\d+x)_'
-            r'(?P<time>\d+hpi)_'
-            r'(?P<date>\d{8})_'              # YYYYMMDD format
-            r'(?P<sample>\d+)\.nd2$'
-        )
+            r'(?P<donor>BEC\d+)_'
+            r'(?P<time>\d+h)_'
+            r'(?P<date>\d{2}\.\d{2}\.\d{2})'
+            r'(?:\.(?P<sample>\d+))?_'
+            r'(?P<mode1>[A-Z0-9]+)_'
+            r'(?P<mode2>[A-Z0-9]+)\.dv$'
+            )
+        else:
+            pattern = re.compile(
+                r'(?P<prefix>[a-zA-Z0-9]+)_'
+                r'(?P<condition>[a-zA-Z0-9]+)_'
+                r'(?P<temp>[0-9]+)_'
+                r'(?P<host>[a-zA-Z]+)_'
+                r'(?P<donor>D\d+)_'
+                r'(?P<mag>\d+x)_'
+                r'(?P<time>\d+hpi)_'
+                r'(?P<date>\d{8})_'              # YYYYMMDD format
+                r'(?P<sample>\d+)\.nd2$'
+            )
 
         records = []
         for file in filenames:
@@ -592,10 +603,13 @@ class CellAnalyzer:
         if column not in self.cells_df.columns:
             raise ValueError(f"Column '{column}' not found in cells_df. Please run calculate_cell_signals() first.")
 
+        # Determine threshold if not given
+        use_otsu = False
         if thresh is None:
             signals = np.array(self.cells_df[column].dropna())
             # Use Otsu's method to find the threshold
             thresh = threshold_otsu(signals)
+            use_otsu = True
             print(f"Using Otsu's method to find the threshold for {column}: {thresh}")
 
         # Use thresholds if given
@@ -610,9 +624,13 @@ class CellAnalyzer:
             bin_nums = {bin_name: i+1 for i, bin_name in enumerate(bins)} # Starting at 1
         col_name = col_name if col_name is not None else signal
         self.cells_df[col_name] = bins[0]  # Initialize the column with the first bin
-        for thresh, bin_name in zip(thresh, bins[1:]):
+        for t, bin_name in zip(thresh, bins[1:]):
             # Set the bin for the cells that are above the threshold
-            self.cells_df.loc[self.cells_df[column] > thresh, col_name] = bin_name
+            self.cells_df.loc[self.cells_df[column] > t, col_name] = bin_name
+
+        # Add a column saving the thresholds used
+        suffix = f"({'otsu' if use_otsu else 'manual'}{', log10' if use_log else ''})"
+        self.cells_df[f'{col_name}_thresh {suffix}'] = str(thresh)
 
         # Create masks for the bins
         bin_masks_out = []
@@ -628,7 +646,7 @@ class CellAnalyzer:
 
         self.bin_masks[signal] = bin_masks_out
 
-    def create_populations(self, signal1, signal2):
+    def create_populations(self, signal1, signal2, signal1_tag=None, signal2_tag=None, col_name=None):
         """
         Analyzes the bins in cells_df, creates a column with the combination of the two signals (= populations).
         The populations are named according to the first three letters of the signal names and the first three letters of the bin names.
@@ -640,6 +658,17 @@ class CellAnalyzer:
                 The name of the first signal to use for the population analysis. Must be according to the bins.
             signal2 : str
                 The name of the second signal to use for the population analysis. Must be according to the bins.
+            signal1_tag : str or None or bool, optional
+                The tag to use for the first signal in the population name.
+                If None, the first three letters of the signal name will be used.
+                If False, the entire signal will be copied without adding a tag (esp. useful if it's already a combination).
+            signal2_tag : str or None or bool, optional
+                The tag to use for the second signal in the population name.
+                If None, the first three letters of the signal name will be used.
+                If False, the entire signal will be copied without adding a tag (esp. useful if it's already a combination).
+            col_name : str, optional
+                The name of the column to create in the cells_df DataFrame.
+                If None, the column name will be the combination of the two signal names (first three letters each) with "_pop" appended.
 
         Returns:
             cells_df : pd.DataFrame
@@ -650,13 +679,21 @@ class CellAnalyzer:
             raise ValueError(f"Signals '{signal1}' and/or '{signal2}' not found in cells_df. Please run calculate_cell_signals() and bin_cell_signal() first.")
 
         # Create a new column for the population, and temp columns
-        pop_col_name = signal1[:3] + "_" + signal2[:3] + "_pop"
-        self.cells_df["temp_signal1"] = signal1[:3]  # First three letters of signal1
-        self.cells_df["temp_signal2"] = signal2[:3]  # First three letters of signal2
+        pop_col_name = col_name if col_name is not None else signal1[:3] + "_" + signal2[:3] + "_pop"
+        
         # Create the population column by combining the two signals
-        self.cells_df[pop_col_name] = self.cells_df["temp_signal1"] + "_" + self.cells_df[signal1].str.slice(0,3) + "_" + self.cells_df["temp_signal2"] + "_" + self.cells_df[signal2].str.slice(0,3)
-        # Drop the temporary columns
-        self.cells_df.drop(columns=["temp_signal1", "temp_signal2"], inplace=True)
+        if signal1_tag is None or signal1_tag:
+            self.cells_df["temp_signal1_tag"] = (signal1[:3] + "_") if signal1_tag is None else signal1_tag + "_"  # First three letters of signal1, or a specific tag
+            self.cells_df[pop_col_name] = self.cells_df["temp_signal1_tag"] + self.cells_df[signal1].str.slice(0,3)
+            self.cells_df.drop(columns=["temp_signal1_tag"], inplace=True)
+        else: # If tag of signal 1 is False, just copy the entire signal 1
+            self.cells_df[pop_col_name] = self.cells_df[signal1]
+        if signal2_tag is None or signal2_tag:
+            self.cells_df["temp_signal2_tag"] = (signal2[:3] + "_") if signal2_tag is None else signal2_tag + "_"  # First three letters of signal2, or a specific tag
+            self.cells_df[pop_col_name] += "_" + self.cells_df["temp_signal2_tag"] + self.cells_df[signal2].str.slice(0,3)
+            self.cells_df.drop(columns=["temp_signal2_tag"], inplace=True)
+        else: # If tag of signal 2 is False, just copy the entire signal 2
+            self.cells_df[pop_col_name] += "_" + self.cells_df[signal2]
         # Make sure the column is a string
         self.cells_df[pop_col_name] = self.cells_df[pop_col_name].astype(str)
 
