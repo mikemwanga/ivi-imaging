@@ -382,9 +382,15 @@ class CellAnalyzer:
             cell_id_min = row["cell_id_min"]
             cell_id_max = row["cell_id_max"]
             # Create a new row for each cell
+            mask = self.masks[i]
             for cell_id in range(cell_id_min, cell_id_max + 1):
                 new_row = row.copy()
                 new_row["cell_id"] = cell_id
+                # Calculate the area of the cell
+                cell_mask = mask == cell_id
+                cell_area = np.sum(cell_mask)
+                new_row["cell_area_px"] = cell_area
+                # Append the new row to the list
                 cells_data.append(new_row)
 
         # Save the DataFrame in the object
