@@ -3,6 +3,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 from cellpose import core, denoise, io, utils
 from skimage import morphology
+from skimage.measure import regionprops
 from skimage.filters import threshold_otsu
 import pandas as pd
 import seaborn as sns
@@ -77,7 +78,7 @@ class CellAnalyzer:
             'masks': self.masks,
             'flows': self.flows,
             'styles': self.styles,
-            'imgs_dn': self.imgs_dn,
+            # 'imgs_dn': self.imgs_dn,
             'outlines': self.outlines,
             'signal_means_dicts': self.signals_dicts,
             'signals_lists': self.signals_lists,
@@ -91,7 +92,7 @@ class CellAnalyzer:
             pickle.dump(data_to_save, f)
 
     @staticmethod
-    def load(pkl_name=None, use_GPU=True):
+    def load(pkl_name=None, use_GPU=True, load_images=False):
         """
         Loads the object from a pickle file.
         
@@ -103,6 +104,16 @@ class CellAnalyzer:
             CellAnalyzer instance
                 The loaded CellAnalyzer instance.
         """
+        # Automatically find the pickle file if not given
+        if pkl_name[-4:] != ".pkl": # If a folder given instead of file, try find the pickle file; if it's not in the current folder, look if there is a folder CellAnalyzer and look in there
+            folder_path = Path(pkl_name)
+            if (folder_path / "CellAnalyzer.pkl").exists():
+                pkl_name = folder_path / "CellAnalyzer.pkl"
+            elif (folder_path / "CellAnalyzer" / "CellAnalyzer.pkl").exists():
+                pkl_name = folder_path / "CellAnalyzer" / "CellAnalyzer.pkl"
+            else:
+                raise ValueError(f"Could not find CellAnalyzer.pkl in {folder_path} or {folder_path / 'CellAnalyzer'}. Please provide the full path to the pickle file.")
+
         # Load the object
         with open(pkl_name, "rb") as f:
             data = pickle.load(f)
@@ -111,10 +122,11 @@ class CellAnalyzer:
         # Update the instance with the loaded data
         loaded_instance.__dict__.update(data)
 
-        # Load the image
-        loaded_instance.img_arrays = [AICSImage(loaded_instance.samples_df["filepath"][i]) for i in range(len(loaded_instance.samples_df))]
-        # Convert to numpy array
-        loaded_instance.img_arrays = [img.get_image_data("CZYX", T=0) for img in loaded_instance.img_arrays]
+        if load_images:
+            # Load the images
+            loaded_instance.img_arrays = [AICSImage(loaded_instance.samples_df["filepath"][i]) for i in range(len(loaded_instance.samples_df))]
+            # Convert to numpy array
+            loaded_instance.img_arrays = [img.get_image_data("CZYX", T=0) for img in loaded_instance.img_arrays]
 
         # Cellpose model
         loaded_instance.load_cellpose_model()
@@ -132,23 +144,31 @@ class CellAnalyzer:
         self.cellpose_model = denoise.CellposeDenoiseModel(gpu=use_GPU, model_type="cyto3",
                                             restore_type="denoise_cyto3")
         
-    def read_data(self, old_parsing=False):
+    def read_data(self, parsing_settings="ALI"):
         """
         Parses structured microscopy .dv filenames from a given folder and returns a DataFrame
         with extracted metadata.
+        Takes the path from the class initialization. Saves the DataFrame and image arrays in the object.
         
         Parameters:
-            input_folder (str or Path): Path to the folder containing .dv files
+            parsing_settings : str, optional
+                The parsing settings to use. Options are "ALI" (default) or "jinglecells".
+                "ALI" expects filenames in the format:
+                <prefix>_<condition>_<temp>_<host>_<donor>_<mag>_<time>_<date>_<sample>.nd2
+                "jinglecells" expects filenames in the format:
+                <condition>_<donor>_<time>_<date>.<sample>_<mode1>_<mode2>.dv
         
         Returns:
-            pd.DataFrame:
+            pd.DataFrame, np.array:
                 DataFrame containing extracted metadata from filenames
+                and a list of loaded image arrays.
         """
         input_path = self.path
-        filenames = list(input_path.glob("*.dv"))
 
         # Regex pattern to extract components
-        if old_parsing:
+        if parsing_settings=="jinglecells":
+            file_extension = ".dv"
+            date_format = "%y.%m.%d"
             pattern = re.compile(
             r'(?P<condition>[a-zA-Z0-9]+)_'
             r'(?P<donor>BEC\d+)_'
@@ -159,6 +179,8 @@ class CellAnalyzer:
             r'(?P<mode2>[A-Z0-9]+)\.dv$'
             )
         else:
+            file_extension = ".nd2"
+            date_format = "%Y%m%d"
             pattern = re.compile(
                 r'(?P<prefix>[a-zA-Z0-9]+)_'
                 r'(?P<condition>[a-zA-Z0-9]+)_'
@@ -171,6 +193,8 @@ class CellAnalyzer:
                 r'(?P<sample>\d+)\.nd2$'
             )
 
+        filenames = list(input_path.glob(f"*{file_extension}"))
+
         records = []
         for file in filenames:
             match = pattern.match(file.name)
@@ -179,6 +203,10 @@ class CellAnalyzer:
                 data["filename"] = file.name
                 data["filepath"] = str(file.resolve()) # Full path for loading
                 records.append(data)
+
+        # Check if any data found
+        if not records:
+            raise ValueError("No suited files found.")
 
         # Create DataFrame
         df = pd.DataFrame(records)
@@ -189,7 +217,7 @@ class CellAnalyzer:
         # Sort the DataFrame by condition, donor, time, date, and sample
         df.sort_values(by=['condition', 'donor', 'time', 'date', 'sample'], inplace=True)
 
-        # Create a new column for "replicate", which is u unique number within each condition-donor group
+        # Create a new column for "replicate", which is a unique number within each condition-donor group
         df['replicate'] = df.groupby(['condition', 'donor']).cumcount() + 1
         # Put it right after "sample"
         sample_index = df.columns.get_loc('sample') + 1
@@ -203,8 +231,9 @@ class CellAnalyzer:
         # Reset index
         df.reset_index(drop=True, inplace=True)
 
+        # Convert date column to datetime
         if not df.empty:
-            df['date'] = pd.to_datetime(df['date'], format="%y.%m.%d")
+            df['date'] = pd.to_datetime(df['date'], format=date_format)
 
         # Load the image
         imgs = [AICSImage(df["filepath"][i]) for i in range(len(df))]
@@ -224,14 +253,19 @@ class CellAnalyzer:
         
         Parameters:
             types : list of str
-                The type of projection to create for each channel. Options are "max", "min", "mean", "median", "sum".
+                The type of projection to create for each channel. Options are "max", "min", "mean", "median", "sum", "perc_X".
+                "perc_X" means percentile, which picks the value at the X-th percentile; e.g. using 99 is similar to max but less sensitive to outliers.
+            c_axis : int
+                The axis of the channels in the image arrays. Default is 0 (CZYX).
+            z_axis : int
+                The axis of the z-dimension in the image arrays. Default is 1 (CZYX).
 
         Returns:
             projections : np.array or list of np.arrays
                 The projections of the images.
         """
         # Test number channels
-        num_channels = self.img_arrays[0].shape[0]
+        num_channels = self.img_arrays[0].shape[c_axis]
         if len(types) != num_channels:
             raise ValueError(f"Number of types ({len(types)}) does not match number of channels ({num_channels}).")
 
@@ -243,8 +277,8 @@ class CellAnalyzer:
                 # Get the projection type for the current channel
                 proj_type = types[i]
                 # Get channel
-                img_channel = img[i]
-                # If the z_axis was behind the c_axis, it was moved one forward
+                img_channel = np.take(img, indices=i, axis=c_axis)
+                # If the z_axis was behind the c_axis, it was moved one forward when extracting the channel
                 if z_axis > c_axis:
                     z_axis -= 1
                 # Create the projection
@@ -258,6 +292,9 @@ class CellAnalyzer:
                     proj = np.median(img_channel, axis=z_axis)
                 elif proj_type == "sum":
                     proj = np.sum(img_channel, axis=z_axis)
+                elif "perc_" in proj_type:
+                    perc = int(proj_type.split("_")[-1])
+                    proj = np.percentile(img_channel, perc, axis=z_axis)
                 else:
                     raise ValueError(f"Projection type '{proj_type}' not recognized. Use 'sum', 'max', 'min', or 'mean'.")  
                 # Append the projection to the list
@@ -277,7 +314,7 @@ class CellAnalyzer:
         
         return projections
         
-    def segment_cells(self, diameter=100, channels=[0,0], log=False):
+    def segment_cells(self, diameter=100, channels=[0,0], log=False, calculate_neighbours=True):
         """
         Segments the input image(s) into separate cells using the Cellpose model.
         If a list of images is given, each output will be a list containing the results for the images.
@@ -321,20 +358,30 @@ class CellAnalyzer:
             diameter can be a list or a single number for all images
         """
 
-        if log:
-            io.logger_setup()
-
         img_list = self.projections
         diam_list = [diameter]*len(img_list)
+
+        if log:
+            io.logger_setup()
+            print("Starting segmentation with Cellpose...")
 
         masks, flows, styles, imgs_dn = self.cellpose_model.eval(img_list, diameter=diam_list, channels=channels)
         outlines = [utils.masks_to_outlines(m) for m in masks]
 
+        if log:
+            print("Segmentation done. Post-processing results...")
+            num_masks = len(masks)
+            print(f"Number of masks: {num_masks}")
+
         # Make cell IDs unique (continuing from previous image)
         prev_max = 0
         new_masks = []
+        max_val = sum([m.max() for m in masks]) # Maximum index is the sum of all cell ids > 0
+        int_type = "int16" if max_val < 32767 else "int32"
         for i, mask in enumerate(masks):
-            new_mask = mask.copy().astype("int16")
+            if log:
+                print(f"Processing mask {i+1}/{num_masks} (int_type={int_type})...")
+            new_mask = mask.copy().astype(int_type)
             # Add the number of cells to the DataFrame (as int)
             self.samples_df.at[i, "num_cells"] = new_mask.max()
             # Make the cell IDs unique
@@ -365,12 +412,16 @@ class CellAnalyzer:
         self.imgs_dn = imgs_dn
         self.outlines = outlines
 
+        if log:
+            print("Post-processing done.")
+            print("Creating cells DataFrame...")
+
         # Start a new df with a row per cell
-        self.create_cells_df()
+        self.create_cells_df(log=log, calculate_neighbours=calculate_neighbours)
 
         return new_masks, flows, styles, imgs_dn, outlines
     
-    def create_cells_df(self):
+    def create_cells_df(self, log=False, calculate_neighbours=True):
         """
         Creates a DataFrame with a row for each cell in the images.
         The DataFrame contains all columns of the images df, plus specifications for each cell.
@@ -378,6 +429,8 @@ class CellAnalyzer:
         # Create a new DataFrame with a row for each cell
         cells_data = []
         for i, row in self.samples_df.iterrows():
+            if log:
+                print(f"Processing image {i+1}/{len(self.samples_df)} for cells DataFrame...")
             # Get the cell ID range for this image
             cell_id_min = row["cell_id_min"]
             cell_id_max = row["cell_id_max"]
@@ -390,6 +443,10 @@ class CellAnalyzer:
                 cell_mask = mask == cell_id
                 cell_area = np.sum(cell_mask)
                 new_row["cell_area_px"] = cell_area
+                # Calculate the neighbours of the cell
+                if calculate_neighbours:
+                    num_neighbours = self.count_surrounding_cells(mask, cell_id, expected_diameter=self.seg_diameter)
+                    new_row["num_neighbours"] = int(num_neighbours)
                 # Append the new row to the list
                 cells_data.append(new_row)
 
@@ -441,9 +498,9 @@ class CellAnalyzer:
             overall_mins[bg_channel] = np.percentile(all_values, norm_perc)
             overall_maxs[bg_channel] = np.percentile(all_values, 100-norm_perc)
 
-        # Take the denoised images and add channels such that it's an RGB image
-        for outline_num, img in enumerate(self.projections):
-            outline = self.outlines[outline_num]
+        # Take empty images and add channels such that it's an RGB image
+        for img_num, img in enumerate(self.projections):
+            outline = self.outlines[img_num]
             # Create a new image with 3 channels, to overlay the outlines
             _, h, w = img.shape
             img_rgb = np.zeros((h, w, 3), dtype=np.uint8)
@@ -461,19 +518,19 @@ class CellAnalyzer:
 
             # Save the image
             img_rgb = Image.fromarray(img_rgb)
-            img_dir = out_folder / f"{self.samples_df['filename'][outline_num]}_outlines.png"
+            img_dir = out_folder / f"{self.samples_df['filename'][img_num]}_outlines.png"
             # Check if the file already exists
             if img_dir.exists() and not overwrite:
                 print(f"File {img_dir} already exists. Saving this file was skipped.")
             else:
                 img_rgb.save(img_dir)
 
-        print(outline_num+1, "outlines saved.")
+        print(img_num+1, "outlines saved.")
         
         # MASKS
 
-        for outline_num, mask in enumerate(self.masks):
-            new_mask = self.masks[outline_num].copy()
+        for img_num, mask in enumerate(self.masks):
+            new_mask = self.masks[img_num].copy()
             # Subtract the minimum value, but only where it is not 0
             min_val = mask[mask>0].min()
             new_mask[mask > 0] -= (min_val -1)
@@ -485,14 +542,14 @@ class CellAnalyzer:
             
             # Save the image
             mapped = Image.fromarray(mapped)
-            img_dir = out_folder / f"{self.samples_df['filename'][outline_num]}_masks.png"
+            img_dir = out_folder / f"{self.samples_df['filename'][img_num]}_masks.png"
             # Check if the file already exists
             if img_dir.exists() and not overwrite:
                 print(f"File {img_dir} already exists. Saving this file was skipped.")
             else:
-                mapped.save(out_folder / f"{self.samples_df['filename'][outline_num]}_masks.png")
+                mapped.save(out_folder / f"{self.samples_df['filename'][img_num]}_masks.png")
 
-        print(outline_num+1, "masks saved.")
+        print(img_num+1, "masks saved.")
 
     def calculate_cell_signals(self, channels, dilate=None, mode="mean"):
         """
@@ -506,6 +563,9 @@ class CellAnalyzer:
                 The amount of dilation to apply to the masks before calculating the mean signal.
                 One value per each channel.
                 If negative, erosion is applied instead of dilation.
+            mode: str
+                The mode used to calculate the representative signal for each cell
+                Default = "mean"; "perc_X" means X-th percentile
 
         Returns:
             cells_df : pd.DataFrame
@@ -514,6 +574,10 @@ class CellAnalyzer:
                 The masks of the signals for each channel, with the same shape as the input images.
                 Keys are the channel names, values are lists of masks for each image.
         """
+        # Check and warn for channels indices
+        if 0 in channels:
+            print("You chose 0 as a channel. This might be an accident. Note that the input channels are 1-indexed.")
+
         # Register the signal mode
         self.signal_mode = mode
 
@@ -554,6 +618,9 @@ class CellAnalyzer:
                         cell_signal = np.mean(img[cell_mask_for_signal])
                     elif mode == "median":
                         cell_signal = np.median(img[cell_mask_for_signal])
+                    elif "perc_" in mode:
+                        perc = int(mode.split("_")[-1])
+                        cell_signal = np.percentile(img[cell_mask_for_signal], perc)
                     else:
                         raise ValueError(f"Mode '{mode}' not recognized. Check docstring for options.")
                     # Assign the signal to the cell ID in the dict and mask
@@ -772,6 +839,57 @@ class CellAnalyzer:
         print(f"Legend saved with matplotlib.")
 
         print("Folder:", out_folder)
+
+    @staticmethod
+    def count_surrounding_cells(mask, cell_id, expected_diameter):
+        """
+        Count how many other cells are within a circular region around a given cell,
+        adjusted for edge effects (partial circle outside image).
+        
+        Parameters:
+            mask : np.ndarray
+                2D array where each cell has a unique integer ID (background = 0).
+            cell_id : int
+                The ID of the cell to analyze.
+            expected_diameter : float
+            The expected diameter of a cell (in pixels).
+        
+        Returns:
+            float
+                Scaled number of unique other cell IDs within the defined circle.
+        """
+        props = regionprops((mask == cell_id).astype(np.uint8))
+        if not props:
+            raise ValueError(f"Cell ID {cell_id} not found in mask.")
+        region = props[0]
+
+        # Cell centroid (y, x)
+        cy, cx = region.centroid
+        # Equivalent circular radius
+        area = np.sum(mask == cell_id)
+        radius = np.sqrt(area / np.pi)
+        extended_radius = radius + expected_diameter/2
+        # print("Cell ID:", cell_id, "Centroid:", (cy, cx), "Radius:", radius, "Extended radius:", extended_radius)
+
+        y_indices, x_indices = np.indices(mask.shape)
+        dist = np.sqrt((x_indices - cx)**2 + (y_indices - cy)**2)
+        circle_mask = dist <= extended_radius
+
+        # Fraction of circle inside the image (edge correction)
+        # Theoretical total circle area:
+        circle_area = np.pi * extended_radius**2
+        # Pixels actually inside image:
+        inside_area = np.sum(circle_mask)
+        inside_fraction = inside_area / circle_area
+
+        # Get IDs within the circle
+        surrounding_ids = np.unique(mask[circle_mask])
+        surrounding_ids = surrounding_ids[(surrounding_ids != 0) & (surrounding_ids != cell_id)]
+
+        # Edge-corrected estimate
+        corrected_count = len(surrounding_ids) / inside_fraction if inside_fraction > 0 else np.nan
+        return corrected_count
+
 
 
 #####################################################################################
