@@ -8,6 +8,7 @@ from skimage.filters import threshold_otsu
 import pandas as pd
 import seaborn as sns
 from pathlib import Path
+import itertools
 import re
 from aicsimageio import AICSImage
 import pickle
@@ -36,6 +37,7 @@ class CellAnalyzer:
         self.cells_df = None
         self.signal_mode = "mean"  # Default mode for signal calculation
         self.bin_masks = {}
+        self.bins = {}
 
         # Load cellpose model
         self.load_cellpose_model()
@@ -85,7 +87,8 @@ class CellAnalyzer:
             'signals_masks': self.signals_masks,
             'cells_df': self.cells_df,
             'signal_mode': self.signal_mode,
-            'bin_masks': self.bin_masks
+            'bin_masks': self.bin_masks,
+            'bins': self.bins
         }
 
         with open(output_path / "CellAnalyzer.pkl", "wb") as f:
@@ -647,6 +650,44 @@ class CellAnalyzer:
         self.cells_df = cells_df
 
         return cells_df, self.signals_masks
+    
+    def save_signals_masks(self, folder_name="signals_masks", overwrite=False):
+        """
+        Saves the signal masks to a file.
+
+        Parameters:
+            folder_name : str
+                The name of the (sub-)folder to save the signal masks to.
+            overwrite : bool
+                Whether to overwrite existing files. Default is False.
+        """
+        # Create the folder if it doesn't exist
+        out_folder = self.path / folder_name
+        out_folder.mkdir(parents=True, exist_ok=True)
+
+        for signal_name, masks_list in self.signals_masks.items():
+            for img_num, mask in enumerate(masks_list):
+                # Normalize to 0-1
+                new_mask = mask.copy()
+                new_mask = (new_mask - new_mask.min()) / (new_mask.max() - new_mask.min())
+                # Map to cmap
+                mapped = plt.cm.viridis(new_mask)
+                mapped = (mapped[:, :, :3] * 255).astype(np.uint8)
+
+                # Create white outlines
+                outline = self.outlines[img_num]
+                mapped[outline] = [255, 255, 255]
+
+                # Save the image
+                mapped = Image.fromarray(mapped)
+                img_dir = out_folder / f"{self.samples_df['filename'][img_num]}_{signal_name}_mask.png"
+                # Check if the file already exists
+                if img_dir.exists() and not overwrite:
+                    print(f"File {img_dir} already exists. Saving this file was skipped.")
+                else:
+                    mapped.save(img_dir)
+
+            print(img_num+1, f"masks for signal '{signal_name}' saved.")
         
     def bin_cell_signal(self, signal, use_log=True, thresh=None, col_name=None):
         """
@@ -695,6 +736,7 @@ class CellAnalyzer:
             thresh.sort()
             bins = ["negative", "partial", "positive"] if len(thresh) == 2 else [i+1 for i in range(len(thresh)+2)]
             bin_nums = {bin_name: i+1 for i, bin_name in enumerate(bins)} # Starting at 1
+        self.bins[signal] = bins
         col_name = col_name if col_name is not None else signal
         self.cells_df[col_name] = bins[0]  # Initialize the column with the first bin
         for t, bin_name in zip(thresh, bins[1:]):
@@ -719,119 +761,145 @@ class CellAnalyzer:
 
         self.bin_masks[signal] = bin_masks_out
 
-    def create_populations(self, signal1, signal2, signal1_tag=None, signal2_tag=None, col_name=None):
+    def save_bin_masks(self, folder_name="binned_signals", overwrite=False):
         """
-        Analyzes the bins in cells_df, creates a column with the combination of the two signals (= populations).
-        The populations are named according to the first three letters of the signal names and the first three letters of the bin names.
-        Also creates RGB images for the populations in the cells_df, with the red channels for signal1 and green for signal2.
-        Further creates a DataFrame with the counts of the populations as a matrix between the two signals.
+        Saves the binned signal masks to a file.
 
         Parameters:
-            signal1 : str
-                The name of the first signal to use for the population analysis. Must be according to the bins.
-            signal2 : str
-                The name of the second signal to use for the population analysis. Must be according to the bins.
-            signal1_tag : str or None or bool, optional
-                The tag to use for the first signal in the population name.
+            folder_name : str
+                The name of the (sub-)folder to save the binned signal masks to.
+            overwrite : bool
+                Whether to overwrite existing files. Default is False.
+        """
+        # Create the folder if it doesn't exist
+        out_folder = self.path / folder_name
+        out_folder.mkdir(parents=True, exist_ok=True)
+
+        for signal_name, masks_list in self.bin_masks.items():
+            bins = self.bins[signal_name]
+            for img_num, mask in enumerate(masks_list):
+                # Normalize to 0-1; according to the number of bins
+                new_mask = mask.copy()
+                new_mask = new_mask / (len(bins))
+                # Map to cmap
+                mapped = plt.cm.viridis(new_mask)
+                mapped = (mapped[:, :, :3] * 255).astype(np.uint8)
+
+                # Create white outlines
+                outline = self.outlines[img_num]
+                mapped[outline] = [255, 255, 255]
+
+                # Save the image
+                mapped = Image.fromarray(mapped)
+                img_dir = out_folder / f"{self.samples_df['filename'][img_num]}_{signal_name}_bin_mask.png"
+                # Check if the file already exists
+                if img_dir.exists() and not overwrite:
+                    print(f"File {img_dir} already exists. Saving this file was skipped.")
+                else:
+                    mapped.save(img_dir)
+
+            print(img_num+1, f"bin masks for signal '{signal_name}' saved.")        
+
+    def create_populations(self, signals, signal_tags=None, col_name=None):
+        """
+        Analyzes the bins in cells_df, creates a column with the combination of any number of signals (= populations).
+        By default, the populations are named according to the first three letters of the signal names and the first three letters of the bin names.
+        If number of signals <= 3, also creates RGB images for the populations in the cells_df, with RGB in order of the signals given.
+
+        Parameters:
+            signals : list of str
+                The names of the signals to combine. Must be same as used for bin_cell_signal().
+            signal_tags : list of str optional
+                The tags to use for each signal in the population name.
                 If None, the first three letters of the signal name will be used.
-                If False, the entire signal will be copied without adding a tag (esp. useful if it's already a combination).
-            signal2_tag : str or None or bool, optional
-                The tag to use for the second signal in the population name.
-                If None, the first three letters of the signal name will be used.
-                If False, the entire signal will be copied without adding a tag (esp. useful if it's already a combination).
             col_name : str, optional
                 The name of the column to create in the cells_df DataFrame.
-                If None, the column name will be the combination of the two signal names (first three letters each) with "_pop" appended.
+                If None, the column name will be the combination of the signal names (first three letters each) with "_pop" appended.
 
         Returns:
             cells_df : pd.DataFrame
                 The cells DataFrame with the bins and populations as columns.
         """
         # Check if the signals are in the cells_df
-        if signal1 not in self.cells_df.columns or signal2 not in self.cells_df.columns:
-            raise ValueError(f"Signals '{signal1}' and/or '{signal2}' not found in cells_df. Please run calculate_cell_signals() and bin_cell_signal() first.")
+        for signal in signals:
+            if signal not in self.cells_df.columns:
+                raise ValueError(f"Signal '{signal}' not found in cells_df. Please run calculate_cell_signals() and bin_cell_signal() first.")
 
         # Create a new column for the population, and temp columns
-        pop_col_name = col_name if col_name is not None else signal1[:3] + "_" + signal2[:3] + "_pop"
-        
-        # Create the population column by combining the two signals
-        if signal1_tag is None or signal1_tag:
-            self.cells_df["temp_signal1_tag"] = (signal1[:3] + "_") if signal1_tag is None else signal1_tag + "_"  # First three letters of signal1, or a specific tag
-            self.cells_df[pop_col_name] = self.cells_df["temp_signal1_tag"] + self.cells_df[signal1].str.slice(0,3)
-            self.cells_df.drop(columns=["temp_signal1_tag"], inplace=True)
-        else: # If tag of signal 1 is False, just copy the entire signal 1
-            self.cells_df[pop_col_name] = self.cells_df[signal1]
-        if signal2_tag is None or signal2_tag:
-            self.cells_df["temp_signal2_tag"] = (signal2[:3] + "_") if signal2_tag is None else signal2_tag + "_"  # First three letters of signal2, or a specific tag
-            self.cells_df[pop_col_name] += "_" + self.cells_df["temp_signal2_tag"] + self.cells_df[signal2].str.slice(0,3)
-            self.cells_df.drop(columns=["temp_signal2_tag"], inplace=True)
-        else: # If tag of signal 2 is False, just copy the entire signal 2
-            self.cells_df[pop_col_name] += "_" + self.cells_df[signal2]
+        pop_col_name = col_name if col_name is not None else "_".join([s[:3] for s in signals]) + "_pop"
+        # Create the population column by combining the signals
+        signal_tags = signal_tags if signal_tags is not None else [s[:3] for s in signals]
+        for i, s in enumerate(signals):
+            # Catch potentail NAs
+            self.cells_df[s] = self.cells_df[s].fillna("NA")
+            # Create a temporary column with the signal tag and the bin
+            self.cells_df["temp_" + s] = signal_tags[i] + "-" + self.cells_df[s].str[:3]
+        self.cells_df[pop_col_name] = self.cells_df[["temp_"+s for s in signals]].agg("_".join, axis=1)
+        # Drop the temp columns
+        self.cells_df.drop(columns=["temp_"+s for s in signals], inplace=True)
         # Make sure the column is a string
         self.cells_df[pop_col_name] = self.cells_df[pop_col_name].astype(str)
 
         return self.cells_df
     
-    def save_population_imgs(self, signal1, signal2, outline_channel="white", folder_name="populations", overwrite=False):
-        
-        # Define output folder
-        pop_name = signal1[:3] + "_" + signal2[:3] + "_pop"
+    def save_population_imgs(self, signals, folder_name="populations", overwrite=False):
+
+        # Checks
+        if not isinstance(signals, (list, tuple)) or len(signals) < 2 or len(signals) > 3:
+            raise ValueError("signals must be a list of 2 or 3 signal names")
+
+        # Create output folder
+        pop_name = "_".join([s[:3] for s in signals]) + "_pop"
         out_folder = self.path / folder_name / pop_name
-        # Create the folder if it doesn't exist
         out_folder.mkdir(parents=True, exist_ok=True)
 
-        # Define the channels
-        outline_channel = {"blue": 2, "green": 1, "red": 0, "white": None}.get(outline_channel.lower(), None)  # Default to white if not recognized
-        channel1 = 0 if outline_channel != 0 else 1  # Use the red for signal1 if outline is not already defined as red
-        channel2 = 1 if (outline_channel != 0 and outline_channel != 1) else 2
+        # Define RGB channels
+        channels = [0, 1, 2]  # R, G, B for up to 3 signals
 
-        # Create RGB images for the populations; e.g. {"negative": 0, "positive": 1}
-        signal1_bin_nums = {bin_name: i for i, bin_name in enumerate(self.cells_df[signal1].unique())}
-        signal2_bin_nums = {bin_name: i for i, bin_name in enumerate(self.cells_df[signal2].unique())}
+        # Create RGB images for the populations (e.g. {"negative": 0, "positive": 1}
+        signal_bin_nums = {s: {bin_name: i for i, bin_name in enumerate(self.bins[s])} for s in signals}
+
         i = 0
-        for mask1, mask2, outline in zip(self.bin_masks[signal1], self.bin_masks[signal2], self.outlines):
-            img_rgb = np.zeros((*mask1.shape, 3), dtype=np.uint8)
-            # Note: masks are 1-indexed
-            img_rgb[:, :, channel1] = mask1 * 255 // (len(signal1_bin_nums))  # Scale up to 255 (excluding 0)
-            img_rgb[:, :, channel2] = mask2 * 255 // (len(signal2_bin_nums))  # Scale up to 255 (excluding 0)
-            # Add the outlines as the chosen channel
-            # outline = morphology.binary_dilation(outline, morphology.disk(1.5))
-            img_rgb[outline] = [255, 255, 255] if outline_channel is None else [0, 0, 0]  # Set the outline channel to white or the specified color
-            if outline_channel is not None:
-                img_rgb[:, :, outline_channel] = outline * 255
+        for masks in zip(*[self.bin_masks[s] for s in signals], self.outlines):
+            *mask_list, outline = masks
+            img_rgb = np.zeros((*mask_list[0].shape, 3), dtype=np.uint8)
+            # Note: masks are 1-indexed, so 0 is background
+            for idx, s in enumerate(signals):
+                # Scale up to 255 (excluding 0)
+                img_rgb[:, :, channels[idx]] = mask_list[idx] * 255 // (len(signal_bin_nums[s]))
+            # Add white outlines
+            img_rgb[outline] = [255, 255, 255]
 
             # Save the image
             img_rgb = Image.fromarray(img_rgb)
             img_dir = out_folder / f"{self.samples_df['filename'][i]}_{pop_name}.png"
-            # Check if the file already exists
             if img_dir.exists() and not overwrite:
                 print(f"File {img_dir} already exists. Saving this file was skipped.")
             else:
                 img_rgb.save(img_dir)
-            
+
             i += 1
         print(i, "populations saved.")
 
-        # --- Save legend with all combinations ---
+        signal_bin_nums = {s: {bin_name: i for i, bin_name in enumerate(sorted(self.bins[s]))} for s in signals}
+        signal_levels = {s: [(i + 1) * 255 // len(signal_bin_nums[s]) for i in range(len(signal_bin_nums[s]))] for s in signals}
 
-        # Make sure bins are in alphabetical order
-        signal1_bin_nums = {bin_name: i for i, bin_name in enumerate(sorted(self.cells_df[signal1].unique()))}
-        signal2_bin_nums = {bin_name: i for i, bin_name in enumerate(sorted(self.cells_df[signal2].unique()))}
-        # Define levels for each bin
-        levels1 = [(i+1)*255//len(signal1_bin_nums) for i in range(len(signal1_bin_nums))]
-        levels2 = [(i+1)*255//len(signal2_bin_nums) for i in range(len(signal2_bin_nums))]
+        # Create legend
+        combos = list(itertools.product(*[signal_bin_nums[s].keys() for s in signals]))
 
-        fig, ax = plt.subplots(figsize=(4, len(signal1_bin_nums)*len(signal2_bin_nums)*0.3))
-        for i1, bin1 in enumerate(signal1_bin_nums):
-            for i2, bin2 in enumerate(signal2_bin_nums):
-                rgb = [0,0,0]
-                rgb[channel1] = levels1[signal1_bin_nums[bin1]]/255
-                rgb[channel2] = levels2[signal2_bin_nums[bin2]]/255
-                ax.add_patch(plt.Rectangle((0, i1*len(signal2_bin_nums)+i2), 1, 1, color=rgb))
-                ax.text(1.1, i1*len(signal2_bin_nums)+i2+0.5, f"{signal1}_{bin1} | {signal2}_{bin2}", va='center')
+        longest_len = 0
+        fig, ax = plt.subplots(figsize=(4, len(combos) * 0.3))
+        for i_combo, combo in enumerate(combos):
+            rgb = [0, 0, 0]
+            for idx, s in enumerate(signals):
+                rgb[channels[idx]] = signal_levels[s][signal_bin_nums[s][combo[idx]]] / 255
+            label = " | ".join([f"{s}_{combo[idx]}" for idx, s in enumerate(signals)])
+            longest_len = max(longest_len, len(label))
+            ax.add_patch(plt.Rectangle((0, i_combo), 1, 1, color=rgb))
+            ax.text(1.1, i_combo + 0.5, label, va='center')
 
-        ax.set_xlim(0, 4)
-        ax.set_ylim(0, len(signal1_bin_nums)*len(signal2_bin_nums))
+        ax.set_xlim(0, 1 + longest_len * 0.3)
+        ax.set_ylim(0, len(combos))
         ax.axis('off')
         plt.tight_layout()
         plt.savefig(out_folder / f"{pop_name}_legend.png", dpi=150)
@@ -839,6 +907,7 @@ class CellAnalyzer:
         print(f"Legend saved with matplotlib.")
 
         print("Folder:", out_folder)
+
 
     @staticmethod
     def count_surrounding_cells(mask, cell_id, expected_diameter):
