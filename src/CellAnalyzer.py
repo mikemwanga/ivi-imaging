@@ -31,9 +31,9 @@ class CellAnalyzer:
         self.styles = None
         self.imgs_dn = None
         self.outlines = None
-        self.signals_dicts = {}
-        self.signals_lists = {}
-        self.signals_masks = {}
+        self.signal_dicts = {}
+        self.signal_lists = {}
+        self.signal_masks = {}
         self.cells_df = None
         self.signal_mode = "mean"  # Default mode for signal calculation
         self.bin_masks = {}
@@ -82,9 +82,9 @@ class CellAnalyzer:
             'styles': self.styles,
             # 'imgs_dn': self.imgs_dn,
             'outlines': self.outlines,
-            'signal_means_dicts': self.signals_dicts,
-            'signals_lists': self.signals_lists,
-            'signals_masks': self.signals_masks,
+            'signal_means_dicts': self.signal_dicts,
+            'signal_lists': self.signal_lists,
+            'signal_masks': self.signal_masks,
             'cells_df': self.cells_df,
             'signal_mode': self.signal_mode,
             'bin_masks': self.bin_masks,
@@ -461,9 +461,9 @@ class CellAnalyzer:
         self.cells_df.reset_index(drop=True, inplace=True)
         self.cells_df.set_index("cell_id", inplace=True)
 
-    def save_segmentation_imgs(self, folder_name="segmentations", background_channels=None, overwrite=False, norm_img=False, norm_perc=1):
+    def save_segmentation_imgs(self, folder_name="segmentations", background_channels=None, overwrite=False, norm_per_img=False, norm_perc=1):
         """
-        Saves the segmentation results to a file.
+        Saves the segmentation results to image files.
 
         Parameters:
             folder_name : str
@@ -472,7 +472,7 @@ class CellAnalyzer:
                 The channels to use for the background of the outlines. If None, uses segmentation channels.
             overwrite : bool
                 Whether to overwrite existing files. Default is False.
-            norm_img : bool
+            norm_per_img : bool
                 Whether to normalize the background channels for each image separately. Default is False (normalize over all images).
             norm_perc : int
                 The percentile to use for normalization of the background channels. Default is 1 (1st and 99th percentile).
@@ -509,9 +509,9 @@ class CellAnalyzer:
             img_rgb = np.zeros((h, w, 3), dtype=np.uint8)
             for rgb_channel, bg_channel in enumerate(bg_channels):
                 channel = img[bg_channel, :, :]
-                # Normalize the channel to 0-255 over all images (or over the current image if norm_img is True)
-                used_min = overall_mins[bg_channel] if not norm_img else np.percentile(channel, norm_perc)
-                used_max = overall_maxs[bg_channel] if not norm_img else np.percentile(channel, 100-norm_perc)
+                # Normalize the channel to 0-255 over all images (or over the current image if norm_per_img is True)
+                used_min = overall_mins[bg_channel] if not norm_per_img else np.percentile(channel, norm_perc)
+                used_max = overall_maxs[bg_channel] if not norm_per_img else np.percentile(channel, 100-norm_perc)
                 channel = (channel - used_min) / (used_max - used_min) * 255
                 channel = np.clip(channel, 0, 255)
                 channel = channel.astype(np.uint8)
@@ -573,7 +573,7 @@ class CellAnalyzer:
         Returns:
             cells_df : pd.DataFrame
                 The cells DataFrame with the mean signal of each cell in the image(s).
-            signals_masks : dict {str: list of np.array}
+            signal_masks : dict {str: list of np.array}
                 The masks of the signals for each channel, with the same shape as the input images.
                 Keys are the channel names, values are lists of masks for each image.
         """
@@ -596,16 +596,16 @@ class CellAnalyzer:
             # Reduce the channel number by one (0-indexed)
             num -= 1
             # Prepare the empty containers
-            signals_dicts_out = []
-            signals_lists_out = []
-            signals_masks_out = []
+            signal_dicts_out = []
+            signal_lists_out = []
+            signal_masks_out = []
             for img, mask in zip(self.projections, self.masks):
                 # Extract the channel from the image
                 img = img[num]
                 # Prepare the empty containers
-                img_signals_dict = {} #{cell_id: np.mean(img[cell_mask_for_mean]) for cell_id in range(1, mask.max()+1)}
-                img_signals_list = [] #[val for k, val in img_signal_means_dict.items()]
-                img_signals_mask = np.zeros_like(img, dtype=np.float32)
+                img_signal_dict = {} #{cell_id: np.mean(img[cell_mask_for_mean]) for cell_id in range(1, mask.max()+1)}
+                img_signal_list = [] #[val for k, val in img_signal_means_dict.items()]
+                img_signal_mask = np.zeros_like(img, dtype=np.float32)
                 # add the signal to the dict and mask
                 lowest_non_zero = mask[mask != 0].min()
                 for cell_id in range(lowest_non_zero, mask.max()+1):
@@ -629,29 +629,29 @@ class CellAnalyzer:
                     # Assign the signal to the cell ID in the dict and mask
                     if np.isnan(cell_signal):
                         cell_signal = 0
-                    img_signals_dict[cell_id] = cell_signal
-                    img_signals_list.append(cell_signal)
-                    img_signals_mask += cell_signal * cell_mask # NOTE: use un-altered mask here to have no overlaps between cells
+                    img_signal_dict[cell_id] = cell_signal
+                    img_signal_list.append(cell_signal)
+                    img_signal_mask += cell_signal * cell_mask # NOTE: use un-altered mask here to have no overlaps between cells
 
                     # Add the signal to the cell_df
                     cells_df.loc[cell_id, name+"_"+mode] = cell_signal
                     # Also add the log10 of the signal
                     cells_df.loc[cell_id, name+"_"+mode+"_log10"] = np.log10(cell_signal) if cell_signal > 0 else 0
 
-                signals_dicts_out.append(img_signals_dict)
-                signals_lists_out.append(img_signals_list)
-                signals_masks_out.append(img_signals_mask)
+                signal_dicts_out.append(img_signal_dict)
+                signal_lists_out.append(img_signal_list)
+                signal_masks_out.append(img_signal_mask)
         
-            self.signals_dicts[name] = signals_dicts_out
-            self.signals_lists[name] = signals_lists_out
-            self.signals_masks[name] = signals_masks_out
+            self.signal_dicts[name] = signal_dicts_out
+            self.signal_lists[name] = signal_lists_out
+            self.signal_masks[name] = signal_masks_out
 
         # Save the cells_df in the object
         self.cells_df = cells_df
 
-        return cells_df, self.signals_masks
+        return cells_df, self.signal_masks
     
-    def save_signals_masks(self, folder_name="signals_masks", overwrite=False):
+    def save_signal_masks(self, folder_name="signal_masks", overwrite=False, norm_per_img=False):
         """
         Saves the signal masks to a file.
 
@@ -661,15 +661,24 @@ class CellAnalyzer:
             overwrite : bool
                 Whether to overwrite existing files. Default is False.
         """
+        # Checks
+        if not self.signal_masks:
+            print("No signal masks found. Please run calculate_cell_signals() first.")
+            return
+
         # Create the folder if it doesn't exist
         out_folder = self.path / folder_name
         out_folder.mkdir(parents=True, exist_ok=True)
 
-        for signal_name, masks_list in self.signals_masks.items():
+        for signal_name, masks_list in self.signal_masks.items():
+            overall_min = min([mask.min() for mask in masks_list])
+            overall_max = max([mask.max() for mask in masks_list])
             for img_num, mask in enumerate(masks_list):
                 # Normalize to 0-1
                 new_mask = mask.copy()
-                new_mask = (new_mask - new_mask.min()) / (new_mask.max() - new_mask.min())
+                used_min = overall_min if not norm_per_img else new_mask.min()
+                used_max = overall_max if not norm_per_img else new_mask.max()
+                new_mask = (new_mask - used_min) / (used_max - used_min)
                 # Map to cmap
                 mapped = plt.cm.viridis(new_mask)
                 mapped = (mapped[:, :, :3] * 255).astype(np.uint8)
@@ -725,6 +734,8 @@ class CellAnalyzer:
             thresh = threshold_otsu(signals)
             use_otsu = True
             print(f"Using Otsu's method to find the threshold for {column}: {thresh}")
+        else:
+            print(f"Using manual threshold(s) for {column}: {thresh}")
 
         # Use thresholds if given
         if isinstance(thresh, float):
@@ -736,11 +747,14 @@ class CellAnalyzer:
             thresh.sort()
             bins = ["negative", "partial", "positive"] if len(thresh) == 2 else [i+1 for i in range(len(thresh)+2)]
             bin_nums = {bin_name: i+1 for i, bin_name in enumerate(bins)} # Starting at 1
+        
+        # Create the binned column in the cells_df
         self.bins[signal] = bins
         col_name = col_name if col_name is not None else signal
         self.cells_df[col_name] = bins[0]  # Initialize the column with the first bin
         for t, bin_name in zip(thresh, bins[1:]):
             # Set the bin for the cells that are above the threshold
+            print(f"Thresholding {bin_name} at {t}")
             self.cells_df.loc[self.cells_df[column] > t, col_name] = bin_name
 
         # Add a column saving the thresholds used
@@ -748,6 +762,7 @@ class CellAnalyzer:
         self.cells_df[f'{col_name}_thresh {suffix}'] = str(thresh)
 
         # Create masks for the bins
+        print(f"Creating bin masks for signal '{signal}'...")
         bin_masks_out = []
         for mask in self.masks:
             bins_mask = np.zeros_like(mask, dtype=np.float32)
@@ -758,6 +773,7 @@ class CellAnalyzer:
                 bin_num = bin_nums[cell_bin]
                 bins_mask += bin_num * cell_mask
             bin_masks_out.append(bins_mask)
+            print(f"Created bin mask for image {len(bin_masks_out)}")
 
         self.bin_masks[signal] = bin_masks_out
 
@@ -771,6 +787,11 @@ class CellAnalyzer:
             overwrite : bool
                 Whether to overwrite existing files. Default is False.
         """
+        # Checks
+        if not self.bin_masks:
+            print("No binned masks found. Please run bin_cell_signal() first.")
+            return
+
         # Create the folder if it doesn't exist
         out_folder = self.path / folder_name
         out_folder.mkdir(parents=True, exist_ok=True)
@@ -842,7 +863,7 @@ class CellAnalyzer:
 
         return self.cells_df
     
-    def save_population_imgs(self, signals, folder_name="populations", overwrite=False):
+    def save_population_masks(self, signals, folder_name="populations", overwrite=False):
 
         # Checks
         if not isinstance(signals, (list, tuple)) or len(signals) < 2 or len(signals) > 3:
@@ -904,7 +925,7 @@ class CellAnalyzer:
         plt.tight_layout()
         plt.savefig(out_folder / f"{pop_name}_legend.png", dpi=150)
         plt.close(fig)
-        print(f"Legend saved with matplotlib.")
+        print(f"Legend saved.")
 
         print("Folder:", out_folder)
 
