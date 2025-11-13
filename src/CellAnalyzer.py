@@ -863,19 +863,18 @@ class CellAnalyzer:
 
         return self.cells_df
     
-    def save_population_masks(self, signals, folder_name="populations", overwrite=False):
+    def save_population_masks(self, signals, folder_name="populations", overwrite=False, rgb_channels=(0, 1, 2)):
 
         # Checks
         if not isinstance(signals, (list, tuple)) or len(signals) < 2 or len(signals) > 3:
             raise ValueError("signals must be a list of 2 or 3 signal names")
+        if len(signals) > len(rgb_channels):
+            raise ValueError("Number of signals exceeds number of RGB channels provided")
 
         # Create output folder
         pop_name = "_".join([s[:3] for s in signals]) + "_pop"
         out_folder = self.path / folder_name / pop_name
         out_folder.mkdir(parents=True, exist_ok=True)
-
-        # Define RGB channels
-        channels = [0, 1, 2]  # R, G, B for up to 3 signals
 
         # Create RGB images for the populations (e.g. {"negative": 0, "positive": 1}
         signal_bin_nums = {s: {bin_name: i for i, bin_name in enumerate(self.bins[s])} for s in signals}
@@ -887,7 +886,7 @@ class CellAnalyzer:
             # Note: masks are 1-indexed, so 0 is background
             for idx, s in enumerate(signals):
                 # Scale up to 255 (excluding 0)
-                img_rgb[:, :, channels[idx]] = mask_list[idx] * 255 // (len(signal_bin_nums[s]))
+                img_rgb[:, :, rgb_channels[idx]] = mask_list[idx] * 255 // (len(signal_bin_nums[s]))
             # Add white outlines
             img_rgb[outline] = [255, 255, 255]
 
@@ -913,7 +912,7 @@ class CellAnalyzer:
         for i_combo, combo in enumerate(combos):
             rgb = [0, 0, 0]
             for idx, s in enumerate(signals):
-                rgb[channels[idx]] = signal_levels[s][signal_bin_nums[s][combo[idx]]] / 255
+                rgb[rgb_channels[idx]] = signal_levels[s][signal_bin_nums[s][combo[idx]]] / 255
             label = " | ".join([f"{s}_{combo[idx]}" for idx, s in enumerate(signals)])
             longest_len = max(longest_len, len(label))
             ax.add_patch(plt.Rectangle((0, i_combo), 1, 1, color=rgb))
