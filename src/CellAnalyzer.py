@@ -1,4 +1,4 @@
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 from matplotlib import pyplot as plt
 from cellpose import core, denoise, io, utils
@@ -475,7 +475,7 @@ class CellAnalyzer:
         self.cells_df.reset_index(drop=True, inplace=True)
         self.cells_df.set_index("cell_id", inplace=True)
 
-    def save_segmentation_imgs(self, folder_name="segmentations", background_channels=None, overwrite=False, norm_per_img=False, norm_perc=1):
+    def save_segmentation_imgs(self, folder_name="segmentations", background_channels=None, overwrite=False, norm_per_img=False, norm_perc=1, scale_bar_px=150, scale_bar_um=20):
         """
         Saves the segmentation results to image files.
 
@@ -491,6 +491,10 @@ class CellAnalyzer:
             norm_perc : int
                 The percentile to use for normalization of the background channels. Default is 1 (1st and 99th percentile).
                 These percentiles are used as min/max, meaning values outside are clipped.
+            scale_bar_px : int
+                Scale bar length in pixels. Default is 100.
+            scale_bar_um : int or float
+                Label value in micrometers for the scale bar. Default is 20.
         """
         # Save the masks, flows, styles and denoised images
         out_folder = self.path / folder_name
@@ -532,6 +536,7 @@ class CellAnalyzer:
                 img_rgb[:, :, rgb_channel] = channel
             # Add white outlines
             img_rgb[outline > 0] = [150, 150, 150]  # Set the outline channel to white
+            img_rgb = self._add_scale_bar(img_rgb, scale_bar_px=scale_bar_px, scale_bar_um=scale_bar_um)
 
             # Save the image
             img_rgb = Image.fromarray(img_rgb)
@@ -556,6 +561,7 @@ class CellAnalyzer:
             # Map to cmap
             mapped = plt.cm.viridis(new_mask)
             mapped = (mapped[:, :, :3] * 255).astype(np.uint8)
+            mapped = self._add_scale_bar(mapped, scale_bar_px=scale_bar_px, scale_bar_um=scale_bar_um)
             
             # Save the image
             mapped = Image.fromarray(mapped)
@@ -797,7 +803,7 @@ class CellAnalyzer:
 
         # return self.cells_df, self.signal_masks
     
-    def save_signal_masks(self, folder_name="signal_masks", overwrite=False, norm_per_img=False):
+    def save_signal_masks(self, folder_name="signal_masks", overwrite=False, norm_per_img=False, scale_bar_px=150, scale_bar_um=20):
         """
         Saves the signal masks to a file.
 
@@ -806,6 +812,10 @@ class CellAnalyzer:
                 The name of the (sub-)folder to save the signal masks to.
             overwrite : bool
                 Whether to overwrite existing files. Default is False.
+            scale_bar_px : int
+                Scale bar length in pixels. Default is 100.
+            scale_bar_um : int or float
+                Label value in micrometers for the scale bar. Default is 20.
         """
         # Checks
         if not self.signal_masks:
@@ -832,6 +842,7 @@ class CellAnalyzer:
                 # Create white outlines
                 outline = self.outlines[img_num]
                 mapped[outline] = [255, 255, 255]
+                mapped = self._add_scale_bar(mapped, scale_bar_px=scale_bar_px, scale_bar_um=scale_bar_um)
 
                 # Save the image
                 mapped = Image.fromarray(mapped)
@@ -996,7 +1007,7 @@ class CellAnalyzer:
 
         return self.cells_df, self.bin_masks
 
-    def save_bin_masks(self, folder_name="binned_signals", overwrite=False):
+    def save_bin_masks(self, folder_name="binned_signals", overwrite=False, scale_bar_px=150, scale_bar_um=20):
         """
         Saves the binned signal masks to a file.
 
@@ -1005,6 +1016,10 @@ class CellAnalyzer:
                 The name of the (sub-)folder to save the binned signal masks to.
             overwrite : bool
                 Whether to overwrite existing files. Default is False.
+            scale_bar_px : int
+                Scale bar length in pixels. Default is 100.
+            scale_bar_um : int or float
+                Label value in micrometers for the scale bar. Default is 20.
         """
         # Checks
         if not self.bin_masks:
@@ -1028,6 +1043,7 @@ class CellAnalyzer:
                 # Create white outlines
                 outline = self.outlines[img_num]
                 mapped[outline] = [255, 255, 255]
+                mapped = self._add_scale_bar(mapped, scale_bar_px=scale_bar_px, scale_bar_um=scale_bar_um)
 
                 # Save the image
                 mapped = Image.fromarray(mapped)
@@ -1085,7 +1101,7 @@ class CellAnalyzer:
 
         return self.cells_df
     
-    def save_population_masks(self, signals, folder_name="populations", overwrite=False, rgb_channels=(0, 1, 2)):
+    def save_population_masks(self, signals, folder_name="populations", overwrite=False, rgb_channels=(0, 1, 2), scale_bar_px=150, scale_bar_um=20):
 
         # Checks
         if not isinstance(signals, (list, tuple)) or len(signals) < 2 or len(signals) > 3:
@@ -1111,6 +1127,7 @@ class CellAnalyzer:
                 img_rgb[:, :, rgb_channels[idx]] = mask_list[idx] * 255 // (len(signal_bin_nums[s]))
             # Add white outlines
             img_rgb[outline] = [255, 255, 255]
+            img_rgb = self._add_scale_bar(img_rgb, scale_bar_px=scale_bar_px, scale_bar_um=scale_bar_um)
 
             # Save the image
             img_rgb = Image.fromarray(img_rgb)
@@ -1149,7 +1166,6 @@ class CellAnalyzer:
         print(f"Legend saved.")
 
         print("Folder:", out_folder)
-
 
     @staticmethod
     def count_surrounding_cells(mask, cell_id, expected_diameter):
@@ -1201,6 +1217,89 @@ class CellAnalyzer:
         corrected_count = len(surrounding_ids) / inside_fraction if inside_fraction > 0 else np.nan
         return corrected_count
 
+    @staticmethod
+    def _add_scale_bar(img_rgb, scale_bar_px=150, scale_bar_um=20):
+        """
+        Adds a semi-transparent scale bar and label to the bottom-right corner of an RGB image.
+
+        Parameters:
+            img_rgb : np.ndarray
+                RGB image array with shape (H, W, 3).
+            scale_bar_px : int
+                Bar length in pixels. If <= 0, no scale bar is drawn.
+            scale_bar_um : int or float
+                Label value in micrometers displayed as '<value> um'.
+
+        Returns:
+            np.ndarray
+                RGB image with scale bar overlay.
+        """
+        if scale_bar_px is None or scale_bar_px <= 0:
+            return img_rgb
+        if img_rgb.ndim != 3 or img_rgb.shape[2] != 3:
+            raise ValueError("img_rgb must be an RGB image with shape (H, W, 3).")
+
+        # Derive geometry from image size so the bar keeps a similar visual weight
+        # across images with different resolutions.
+        h, w = img_rgb.shape[:2]
+        margin = max(8, int(round(min(h, w) * 0.03)))
+        bar_height = max(2, int(round(h * 0.01)))
+        bar_len = int(round(scale_bar_px))
+
+        # Clamp bar length so it always fits inside the image with left/right padding.
+        bar_len = min(bar_len, w - 2 * margin)
+        if bar_len < 2:
+            return img_rgb
+
+        # Bottom-right placement with a small inset from the border.
+        x2 = w - margin
+        x1 = x2 - bar_len
+        y2 = h - margin
+        y1 = max(0, y2 - bar_height)
+
+        label = f"{scale_bar_um} um"
+
+        # Draw on a separate RGBA overlay so we can use transparency (alpha), then
+        # composite once onto the original image.
+        base = Image.fromarray(img_rgb).convert("RGBA")
+        overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+
+        # Semi-transparent white scale bar.
+        draw.rectangle([(x1, y1), (x2, y2)], fill=(255, 255, 255, 180))
+
+        # Use a larger font (about 2x the previous default appearance) for readability.
+        font_size = max(12, int(round(bar_height * 2.0)))
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+        except OSError:
+            try:
+                font = ImageFont.truetype("arial.ttf", font_size)
+            except OSError:
+                font = ImageFont.load_default()
+
+        # Position text just above the bar and right-aligned to the bar end.
+        text_bbox = draw.textbbox((0, 0), label, font=font)
+        text_left, text_top, text_right, text_bottom = text_bbox
+        text_w = text_right - text_left
+        text_h = text_bottom - text_top
+        text_gap = max(3, bar_height // 1.5)
+        text_x = max(margin, x2 - text_w)
+        # Place text by aligning the *visible* text bottom above the bar.
+        # This avoids vertical drift from font-specific bbox offsets.
+        text_y = max(0, y1 - text_gap - text_bottom)
+
+        # Add a subtle dark backing box so the label stays readable on bright images.
+        box_x1 = max(0, text_x + text_left - 2)
+        box_y1 = max(0, text_y + text_top - 1)
+        box_x2 = min(w, text_x + text_right + 2)
+        box_y2 = min(h, text_y + text_bottom + 1)
+        draw.rectangle([(box_x1, box_y1), (box_x2, box_y2)], fill=(0, 0, 0, 90))
+        draw.text((text_x, text_y), label, fill=(255, 255, 255, 180), font=font)
+
+        # Merge overlay and return an RGB uint8 image, consistent with the save pipeline.
+        out = Image.alpha_composite(base, overlay).convert("RGB")
+        return np.array(out, dtype=np.uint8)
 
 
 #####################################################################################
