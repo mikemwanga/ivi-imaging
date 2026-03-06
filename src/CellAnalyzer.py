@@ -38,6 +38,7 @@ class CellAnalyzer:
         self.signal_mode = {}
         self.bin_masks = {}
         self.bins = {}
+        self.cfg_df = None
 
         # Load cellpose model
         self.load_cellpose_model()
@@ -68,6 +69,8 @@ class CellAnalyzer:
             self.samples_df.to_csv(output_path / "metadata.csv", index=False)
         if self.cells_df is not None:
             self.cells_df.to_csv(output_path / "metadata_cells.csv", index=False)
+        if self.cfg_df is not None:
+            self.cfg_df.to_csv(output_path / "metadata_cfg.csv", index=False)
 
         # Save the object
         data_to_save = {
@@ -88,7 +91,8 @@ class CellAnalyzer:
             'cells_df': self.cells_df,
             'signal_mode': self.signal_mode,
             'bin_masks': self.bin_masks,
-            'bins': self.bins
+            'bins': self.bins,
+            'cfg_df': self.cfg_df
         }
 
         with open(output_path / "CellAnalyzer.pkl", "wb") as f:
@@ -317,7 +321,11 @@ class CellAnalyzer:
         self.projections_types = types
 
         # Save the projection types in the DataFrame
-        self.samples_df["projection_types"] = [types for _ in range(len(self.samples_df))]
+        # self.samples_df["projection_types"] = [types for _ in range(len(self.samples_df))]
+        if self.cfg_df is None:
+            self.cfg_df = pd.DataFrame({"projection": types})
+        else:
+            self.cfg_df["projection"] = types
         
         return projections
         
@@ -584,6 +592,11 @@ class CellAnalyzer:
                 The masks of the signals in each image, with the same shape as the input images.
         """
         # Perform checks
+        if self.cells_df is None:
+            raise ValueError("cells_df is empty. Please run previous methods in the pipeline first.")
+        if self.masks is None:
+            raise ValueError("masks are empty. Please run segment_cells() first.")
+        
         if channel_num < 1 or channel_num >= len(self.projections[0])+1:
             raise ValueError(f"Channel number {channel_num} for channel {channel_name} is out of bounds for the projections." +
                              f"Available channels: {len(self.projections[0])}.")
@@ -642,10 +655,12 @@ class CellAnalyzer:
                 img_signal_list.append(cell_signal)
                 img_signal_mask += cell_signal * cell_mask # NOTE: use un-altered mask here to have no overlaps between cells, even though for the calculation of the signal, the dilated/eroded mask was used
 
-                # Add the signal to the cell_df
-                cells_df.loc[cell_id, channel_name+"_"+mode] = cell_signal
+                # Add the signal to the cells_df
+                # cells_df.loc[cell_id, channel_name+"_"+mode] = cell_signal
+                cells_df.loc[cell_id, channel_name+"_signal"] = cell_signal
+
                 # Also add the log10 of the signal
-                cells_df.loc[cell_id, channel_name+"_"+mode+"_log10"] = np.log10(cell_signal) if cell_signal > 0 else 0
+                cells_df.loc[cell_id, channel_name+"_signal_log10"] = np.log10(cell_signal) if cell_signal > 0 else 0
 
             signal_dicts_out.append(img_signal_dict)
             signal_lists_out.append(img_signal_list)
@@ -657,6 +672,19 @@ class CellAnalyzer:
 
         # Save the cells_df in the object
         self.cells_df = cells_df
+        # Add the signal dilation and mode to the cfg_df
+        if self.cfg_df is not None:
+            self.cfg_df.loc[channel_num, "channel_name"] = channel_name
+            self.cfg_df.loc[channel_num, "signal_dilate"] = dilate
+            self.cfg_df.loc[channel_num, "signal_mode"] = mode
+            # Move name to first column
+            cols = self.cfg_df.columns.tolist()
+            cols = ["channel_name"] + [col for col in cols if col != "channel_name"]
+            self.cfg_df = self.cfg_df[cols]
+        else:
+            self.cfg_df = pd.DataFrame({channel_num: {"channel_name": channel_name, "signal_dilate": dilate, "signal_mode": mode}}).T
+        # Ensure int, since with NaN values, it becomes float
+        self.cfg_df["signal_dilate"] = self.cfg_df["signal_dilate"].astype("Int64")
 
         return cells_df, signal_masks_out
 
@@ -670,7 +698,9 @@ class CellAnalyzer:
                 A dictionary with channel names as keys and channel numbers as values, indicating which channels to use for the signal calculation.
             dilate : int or dict
                 The amount of dilation to apply to the masks before calculating the mean signal for each channel.
-                If negative, erosion is applied instead of dilation. If a single int is given, it is applied to all channels. If a dict is given, it should have the same keys as channels, with the corresponding dilation values.
+                If negative, erosion is applied instead of dilation.
+                If a single int is given, it is applied to all channels.
+                If a dict is given, it should have the same keys as channels, with the corresponding dilation values.
             mode: str or dict
                 The mode used to calculate the representative signal for each cell. If a single str is given, it is applied to all channels. If a dict is given, it should have the same keys as channels, with the corresponding mode values.
                 Default = "mean"; "perc_X" means X-th percentile
@@ -686,14 +716,23 @@ class CellAnalyzer:
             dilate = {name: dilate for name in channels.keys()}
         elif not all([k in channels.keys() for k in dilate.keys()]):
             raise ValueError('dilate must be a dict with the same keys as channels, or a single int to use for all channels.')
-
+        # Fill in a default dilate in case a signal is given but not a dilate
+        for name in channels.keys():
+            if name not in dilate.keys():
+                print(f"No dilation value given for {name}, applying no dilation/erosion for this channel.")
+                dilate[name] = 0
         if isinstance(mode, str):
             mode = {name: mode for name in channels.keys()}
         elif not all([k in channels.keys() for k in mode.keys()]):
             raise ValueError('mode must be a dict with the same keys as channels, or a single str to use for all channels.')
-
+        # Fill in a default mode in case a signal is given but not a mode
         for name in channels.keys():
-            print("Started analyzing signal", name, "with parameters: dilate =", dilate[name], ", mode =", mode[name])
+            if name not in mode.keys():
+                print(f"No mode value given for {name}, applying 'mean' for this channel.")
+                mode[name] = "mean"
+
+        # Calculate the signals for each channel
+        for name in channels.keys():
             self.calculate_single_cell_signal(channel_name=name, channel_num=channels[name], dilate=dilate[name], mode=mode[name])
 
         return self.cells_df, self.signal_masks
@@ -805,11 +844,11 @@ class CellAnalyzer:
 
             print(img_num+1, f"masks for signal '{signal_name}' saved.")
         
-    def bin_cell_signal(self, signal, use_log=True, thresh=None, col_name=None):
+    def bin_single_cell_signal(self, signal, use_log=True, thresh=None):
         """
         Bins the signal of each cell in the cell_df dataframe based on one or multiple thresholds.
         The bins will be called "negative" and "positive" if only one threshold is given,
-        "negative", "medium" and "positive" if three thresholds are given, and will be numbered otherwise.
+        "negative", "partial" and "positive" if three thresholds are given, and will be numbered otherwise.
         Also creates masks with the binning for each cell in the cells_df DataFrame, with the value being the bin number (0="negative" etc.)
 
         Parameters:
@@ -819,16 +858,23 @@ class CellAnalyzer:
                 Whether to use the log10 of the signal for binning.
             thresh: float, list of floats or None
                 The threshold(s) to use for binning the signal.
-                If None, Otsu's method is used on the mean signal of the cells.
-                If a list, three or more bins are created.
-            col_name: str, optional
-                The name of the column to create in the cells_df DataFrame.
-                If None, the column name will be the signal name with "_bin" appended.
+                If None, Otsu's method is used to determine a single threshold.
+                If a single float is given, it is used as the threshold.
+                If a list, all values are used to divide the signal int len(thresh)+1 bins.
 
         Returns:
-            None
+            cells_df : pd.DataFrame
+                The cells DataFrame with the added column for the binned signal.
+            bin_masks : list of np.array
+                The masks of the binned signals in each image, with the same shape as the input images, where the value of each cell is the bin number.
         """
-        column = f'{signal}_{self.signal_mode}{"_log10" if use_log else ""}'
+        # Perform checks
+        if self.cells_df is None:
+            raise ValueError("cells_df is empty. Please run calculate_cell_signals() first.")
+        if self.masks is None:
+            raise ValueError("masks are empty. Please run segment_cells() first.")
+
+        column = f"{signal}_signal{'_log10' if use_log else ''}"
 
         if column not in self.cells_df.columns:
             raise ValueError(f"Column '{column}' not found in cells_df. Please run calculate_cell_signals() first.")
@@ -837,6 +883,8 @@ class CellAnalyzer:
         use_otsu = False
         if thresh is None:
             signals = np.array(self.cells_df[column].dropna())
+            if signals.size == 0:
+                raise ValueError(f"No non-NA values found in column '{column}' for thresholding.")
             # Use Otsu's method to find the threshold
             thresh = threshold_otsu(signals)
             use_otsu = True
@@ -845,44 +893,108 @@ class CellAnalyzer:
             print(f"Using manual threshold(s) for {column}: {thresh}")
 
         # Use thresholds if given
-        if isinstance(thresh, float):
+        if isinstance(thresh, (int, float)):
             thresh = [thresh]
         if len(thresh) == 1:
             bins = ["negative", "positive"]
-            bin_nums = {"negative": 1, "positive": 2}
+        elif len(thresh) == 2:
+            bins = ["negative", "partial", "positive"]
         else:
-            thresh.sort()
-            bins = ["negative", "partial", "positive"] if len(thresh) == 2 else [i+1 for i in range(len(thresh)+2)]
-            bin_nums = {bin_name: i+1 for i, bin_name in enumerate(bins)} # Starting at 1
+            bins = [str(i + 1) for i in range(len(thresh) + 1)]
+        bin_nums = {bin_name: i + 1 for i, bin_name in enumerate(bins)}  # 1-indexed, 0 kept for background
+        # Sort thresholds if there are multiple given
+        thresh = sorted(thresh)
         
-        # Create the binned column in the cells_df
+        # Create the bin column in the cells_df
         self.bins[signal] = bins
-        col_name = col_name if col_name is not None else signal
+        col_name = f"{signal}_bin" #{'_log10' if use_log else ''}_bin"
         self.cells_df[col_name] = bins[0]  # Initialize the column with the first bin
         for t, bin_name in zip(thresh, bins[1:]):
             # Set the bin for the cells that are above the threshold
             print(f"Thresholding {bin_name} at {t}")
             self.cells_df.loc[self.cells_df[column] > t, col_name] = bin_name
 
-        # Add a column saving the thresholds used
-        suffix = f"({'otsu' if use_otsu else 'manual'}{', log10' if use_log else ''})"
-        self.cells_df[f'{col_name}_thresh {suffix}'] = str(thresh)
+        # Add a column with the thresholds and parameters used to the cfg_df
+        if self.cfg_df is not None:
+            if "channel_name" in self.cfg_df.columns and signal in self.cfg_df["channel_name"].values:
+                channel_num = self.cfg_df[self.cfg_df["channel_name"] == signal].index[0]
+                thresh_type = f"{'otsu' if use_otsu else 'manual'}"
+                # self.cfg_df.loc[channel_num, f'threshold_{thresh_type}'] = str(thresh)
+                self.cfg_df.loc[channel_num, 'bin_use_log'] = str(use_log)
+                self.cfg_df.loc[channel_num, 'bin_threshold_type'] = thresh_type
+                self.cfg_df.loc[channel_num, f'bin_threshold(s)'] = str(thresh)
+            else:
+                print(f"Warning: signal '{signal}' not found in cfg_df. Thresholds not saved in cfg_df.")
+        else:
+            print("Warning: cfg_df is None. Thresholds not saved in cfg_df.")
 
         # Create masks for the bins
         print(f"Creating bin masks for signal '{signal}'...")
         bin_masks_out = []
         for mask in self.masks:
-            bins_mask = np.zeros_like(mask, dtype=np.float32)
-            lowest_non_zero = mask[mask != 0].min()
-            for cell_id in range(lowest_non_zero, mask.max()+1):
+            bins_mask = np.zeros_like(mask, dtype=np.uint16)
+            cell_ids = np.unique(mask)
+            cell_ids = cell_ids[cell_ids != 0]
+            for cell_id in cell_ids:
                 cell_mask = mask == cell_id
                 cell_bin = self.cells_df.loc[cell_id, col_name]
                 bin_num = bin_nums[cell_bin]
-                bins_mask += bin_num * cell_mask
+                bins_mask[cell_mask] = bin_num
             bin_masks_out.append(bins_mask)
             print(f"Created bin mask for image {len(bin_masks_out)}")
 
         self.bin_masks[signal] = bin_masks_out
+    
+        return self.cells_df, bin_masks_out
+    
+    def bin_cell_signals(self, signals, use_log=True, thresh=None):
+        """
+        Bins the signals of each cell in the cell_df dataframe based on one or multiple thresholds for multiple signals.
+        The bins will be called "negative" and "positive" if only one threshold is given,
+        "negative", "partial" and "positive" if three thresholds are given, and will be numbered otherwise.
+        Also creates masks with the binning for each cell in the cells_df DataFrame, with the value being the bin number (0="negative" etc.)
+
+        Parameters:
+            signals: list of str or str
+                The names of the signals to bin. Must be same as used for calculate_cell_signals().
+                (the "log" suffix will be added automatically based on the use_log parameter)
+                If a single string is given, it is used as the signal to bin.
+            use_log: bool or dict
+                Whether to use the log10 of the signal for binning.
+                If a single bool is given, it is applied to all signals.
+                If a dict is given, it should have the same keys as signals, with the corresponding bool values.
+            thresh: float, list of floats or None OR dict with signal names as keys and float, list of floats or None as values
+                The threshold(s) to use for binning the signals.
+                If only one input is given for thresh, it is applied to all signals.
+                If a dict is given, it should have the same keys as signals, with the corresponding threshold(s) values.
+                Cases:
+                    - None -> Otsu's method is used to determine a single threshold for each signal.
+                    - single float (or int) -> is given, it is used as the threshold (into 2 bins).
+                    - list -> all values are used to divide the signal int len(thresh)+1 bins.
+
+        Returns:
+            cells_df : pd.DataFrame
+                The cells DataFrame with the added columns for the binned signals.
+            bin_masks : dict
+                A dictionary with signal names as keys and lists of np.arrays as values, where each list contains the masks of the binned signals in each image for the corresponding signal, with the same shape as the input images, where the value of each cell is the bin number.
+        """
+        # Perform checks
+        if isinstance(signals, str):
+            signals = [signals]
+        if isinstance(use_log, bool):
+            use_log = {signal: use_log for signal in signals}
+        elif not all([s in use_log.keys() for s in signals]):
+            raise ValueError('use_log must be a dict with the same keys as signals, or a single bool to use for all signals.')
+        if isinstance(thresh, (int, float)) or thresh is None:
+            thresh = {signal: thresh for signal in signals}
+        elif not all([s in thresh.keys() for s in signals]):
+            raise ValueError('thresh must be a dict with the same keys as signals, or a single value to use for all signals.')
+        
+        # Bin each signal
+        for signal in signals:
+            self.bin_single_cell_signal(signal=signal, use_log=use_log[signal], thresh=thresh[signal])
+
+        return self.cells_df, self.bin_masks
 
     def save_bin_masks(self, folder_name="binned_signals", overwrite=False):
         """
@@ -949,19 +1061,22 @@ class CellAnalyzer:
                 The cells DataFrame with the bins and populations as columns.
         """
         # Check if the signals are in the cells_df
-        for signal in signals:
+        for i, signal in enumerate(signals):
+            if signal[-4:] != "_bin":
+                signal = signal+"_bin"
+                signals[i] = signal
             if signal not in self.cells_df.columns:
-                raise ValueError(f"Signal '{signal}' not found in cells_df. Please run calculate_cell_signals() and bin_cell_signal() first.")
+                raise ValueError(f"Bin column for signal '{signal}' not found in cells_df. Please run calculate_cell_signals() and bin_cell_signal() first.")
 
         # Create a new column for the population, and temp columns
         pop_col_name = col_name if col_name is not None else "_".join([s[:3] for s in signals]) + "_pop"
-        # Create the population column by combining the signals
+        # Create the population column by combining the signals; can be overridden by signal_tags input
         signal_tags = signal_tags if signal_tags is not None else [s[:3] for s in signals]
         for i, s in enumerate(signals):
             # Catch potentail NAs
             self.cells_df[s] = self.cells_df[s].fillna("NA")
-            # Create a temporary column with the signal tag and the bin
-            self.cells_df["temp_" + s] = signal_tags[i] + "-" + self.cells_df[s].str[:3]
+            # Create a temporary column with the signal tag and the bin name (e.g. "cil-neg"), to then combine into the population column
+            self.cells_df["temp_" + s] = signal_tags[i] + "-" + self.cells_df[s].astype(str).str[:3]
         self.cells_df[pop_col_name] = self.cells_df[["temp_"+s for s in signals]].agg("_".join, axis=1)
         # Drop the temp columns
         self.cells_df.drop(columns=["temp_"+s for s in signals], inplace=True)
