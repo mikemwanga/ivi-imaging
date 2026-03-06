@@ -35,7 +35,7 @@ class CellAnalyzer:
         self.signal_lists = {}
         self.signal_masks = {}
         self.cells_df = None
-        self.signal_mode = "mean"  # Default mode for signal calculation
+        self.signal_mode = {}
         self.bin_masks = {}
         self.bins = {}
 
@@ -267,6 +267,10 @@ class CellAnalyzer:
             projections : np.array or list of np.arrays
                 The projections of the images.
         """
+        # Check if the axis indices are valid
+        if c_axis < 0 or c_axis > 3 or z_axis < 0 or z_axis > 3 or c_axis == z_axis:
+            raise ValueError("Axis indices must be between 0 and 3 and different from each other.")
+
         # Test number channels
         num_channels = self.img_arrays[0].shape[c_axis]
         if len(types) != num_channels:
@@ -334,13 +338,15 @@ class CellAnalyzer:
 
         Returns:
             masks : np.array or list of np.arrays
-                The masks of the segmented cells.
+                The masks of the segmented cells. Also saved in the object as self.masks.
             flows : np.array or list of np.arrays
-                The flows of the segmented cells.
+                The flows of the segmented cells. Also saved in the object as self.flows.
             styles : np.array or list of np.arrays
-                The styles of the segmented cells.
+                The styles of the segmented cells. Also saved in the object as self.styles.
             imgs_dn : np.array or list of np.arrays
-                The denoised images of the segmented cells.
+                The denoised images of the segmented cells. Also saved in the object as self.imgs_dn.
+            outlines : np.array or list of np.arrays
+                The outlines of the segmented cells. Also saved in the object as self.outlines.
 
         Channels:
             define CHANNELS to run segementation on
@@ -554,17 +560,18 @@ class CellAnalyzer:
 
         print(img_num+1, "masks saved.")
 
-    def calculate_cell_signals(self, channels, dilate=None, mode="mean"):
+    def calculate_single_cell_signal(self, channel_name, channel_num, dilate=None, mode="mean"):
         """
         Extracts the mean signal of each cell in the input image(s) based on the masks.
         Will populate the signal_means_dicts, signal_means_lists and signal_means_masks attributes.
 
         Parameters:
-            channels : dict {str: int}
-                Name and position of the channels to use for the mean signal calculation.
-            dilate : dict {str: int} or int, optional
+            channel_name : str
+                Name of the channel to use for the signal calculation.
+            channel_num : int
+                Position of the channel to use for the signal calculation.
+            dilate : int
                 The amount of dilation to apply to the masks before calculating the mean signal.
-                One value per each channel.
                 If negative, erosion is applied instead of dilation.
             mode: str
                 The mode used to calculate the representative signal for each cell
@@ -572,84 +579,184 @@ class CellAnalyzer:
 
         Returns:
             cells_df : pd.DataFrame
-                The cells DataFrame with the mean signal of each cell in the image(s).
-            signal_masks : dict {str: list of np.array}
-                The masks of the signals for each channel, with the same shape as the input images.
-                Keys are the channel names, values are lists of masks for each image.
+                The cells DataFrame with the calculated representative signal of each cell in the image(s).
+            signal_masks : list of np.array
+                The masks of the signals in each image, with the same shape as the input images.
         """
-        # Check and warn for channels indices
-        if 0 in channels:
-            print("You chose 0 as a channel. This might be an accident. Note that the input channels are 1-indexed.")
+        # Perform checks
+        if channel_num < 1 or channel_num >= len(self.projections[0])+1:
+            raise ValueError(f"Channel number {channel_num} for channel {channel_name} is out of bounds for the projections." +
+                             f"Available channels: {len(self.projections[0])}.")
+        if channel_num == 0:
+            raise ValueError(f"You chose 0 as a channel for {channel_name}. This must be an accident." +
+                             "Note that the input channels are 1-indexed, and with the input 0, you would be using -1 as index.")
+        channel_num -= 1 # Decrease by 1 to make it 0-indexed
 
         # Register the signal mode
-        self.signal_mode = mode
+        self.signal_mode[channel_name] = mode
 
+        # Make sure dilate is a valid input
         if dilate is None:
-            dilate = {name: 0 for name in channels.keys()}
-        elif isinstance(dilate, int):
-            dilate = {name: dilate for name in channels.keys()}
-        elif not all([k in channels.keys() for k in dilate.keys()]):
-            raise ValueError('dilate must be a list of the same length as channels, or a single int to use for all channels.')
+            dilate = 0
 
+        # Perform the calculation
         cells_df = self.cells_df.copy()
-        for name, num in channels.items():
-            # Reduce the channel number by one (0-indexed)
-            num -= 1
+        signal_dicts_out = []
+        signal_lists_out = []
+        signal_masks_out = []
+        for img, mask in zip(self.projections, self.masks):
+
+            # Extract the channel from the image
+            img = img[channel_num]
             # Prepare the empty containers
-            signal_dicts_out = []
-            signal_lists_out = []
-            signal_masks_out = []
-            for img, mask in zip(self.projections, self.masks):
-                # Extract the channel from the image
-                img = img[num]
-                # Prepare the empty containers
-                img_signal_dict = {} #{cell_id: np.mean(img[cell_mask_for_mean]) for cell_id in range(1, mask.max()+1)}
-                img_signal_list = [] #[val for k, val in img_signal_means_dict.items()]
-                img_signal_mask = np.zeros_like(img, dtype=np.float32)
-                # add the signal to the dict and mask
-                lowest_non_zero = mask[mask != 0].min()
-                for cell_id in range(lowest_non_zero, mask.max()+1):
-                    cell_mask = mask == cell_id
-                    cell_mask_for_signal = cell_mask.copy()
-                    # Dilate or erode if needed
-                    if dilate[name] > 0:
-                        cell_mask_for_signal = morphology.binary_dilation(cell_mask_for_signal, morphology.disk(dilate[name]))
-                    elif dilate[name] < 0:
-                        cell_mask_for_signal = morphology.binary_erosion(cell_mask_for_signal, morphology.disk(-dilate[name]))
-                    # Calculate the mean or median signal for the cell
-                    if mode == "mean":
-                        cell_signal = np.mean(img[cell_mask_for_signal])
-                    elif mode == "median":
-                        cell_signal = np.median(img[cell_mask_for_signal])
-                    elif "perc_" in mode:
-                        perc = int(mode.split("_")[-1])
-                        cell_signal = np.percentile(img[cell_mask_for_signal], perc)
-                    else:
-                        raise ValueError(f"Mode '{mode}' not recognized. Check docstring for options.")
-                    # Assign the signal to the cell ID in the dict and mask
-                    if np.isnan(cell_signal):
-                        cell_signal = 0
-                    img_signal_dict[cell_id] = cell_signal
-                    img_signal_list.append(cell_signal)
-                    img_signal_mask += cell_signal * cell_mask # NOTE: use un-altered mask here to have no overlaps between cells
+            img_signal_dict = {} #{cell_id: np.mean(img[cell_mask_for_mean]) for cell_id in range(1, mask.max()+1)}
+            img_signal_list = [] #[val for k, val in img_signal_means_dict.items()]
+            img_signal_mask = np.zeros_like(img, dtype=np.float32)
+            # add the signal to the dict and mask
+            lowest_non_zero = mask[mask != 0].min()
 
-                    # Add the signal to the cell_df
-                    cells_df.loc[cell_id, name+"_"+mode] = cell_signal
-                    # Also add the log10 of the signal
-                    cells_df.loc[cell_id, name+"_"+mode+"_log10"] = np.log10(cell_signal) if cell_signal > 0 else 0
+            for cell_id in range(lowest_non_zero, mask.max()+1):
+                cell_mask = mask == cell_id
+                cell_mask_for_signal = cell_mask.copy()
+                # Dilate or erode if needed
+                if dilate > 0:
+                    cell_mask_for_signal = morphology.binary_dilation(cell_mask_for_signal, morphology.disk(dilate))
+                elif dilate < 0:
+                    cell_mask_for_signal = morphology.binary_erosion(cell_mask_for_signal, morphology.disk(-dilate))
 
-                signal_dicts_out.append(img_signal_dict)
-                signal_lists_out.append(img_signal_list)
-                signal_masks_out.append(img_signal_mask)
-        
-            self.signal_dicts[name] = signal_dicts_out
-            self.signal_lists[name] = signal_lists_out
-            self.signal_masks[name] = signal_masks_out
+                # Calculate the mean or median signal for the cell
+                if mode == "mean":
+                    cell_signal = np.mean(img[cell_mask_for_signal])
+                elif mode == "median":
+                    cell_signal = np.median(img[cell_mask_for_signal])
+                elif "perc_" in mode:
+                    perc = int(mode.split("_")[-1])
+                    cell_signal = np.percentile(img[cell_mask_for_signal], perc)
+                else:
+                    raise ValueError(f"Mode '{mode}' not recognized for channel {channel_name}. Check docstring for options.")
+
+                # Assign the signal to the cell ID in the dict and mask
+                if np.isnan(cell_signal):
+                    cell_signal = 0
+                img_signal_dict[cell_id] = cell_signal
+                img_signal_list.append(cell_signal)
+                img_signal_mask += cell_signal * cell_mask # NOTE: use un-altered mask here to have no overlaps between cells, even though for the calculation of the signal, the dilated/eroded mask was used
+
+                # Add the signal to the cell_df
+                cells_df.loc[cell_id, channel_name+"_"+mode] = cell_signal
+                # Also add the log10 of the signal
+                cells_df.loc[cell_id, channel_name+"_"+mode+"_log10"] = np.log10(cell_signal) if cell_signal > 0 else 0
+
+            signal_dicts_out.append(img_signal_dict)
+            signal_lists_out.append(img_signal_list)
+            signal_masks_out.append(img_signal_mask)
+
+        self.signal_dicts[channel_name] = signal_dicts_out
+        self.signal_lists[channel_name] = signal_lists_out
+        self.signal_masks[channel_name] = signal_masks_out
 
         # Save the cells_df in the object
         self.cells_df = cells_df
 
-        return cells_df, self.signal_masks
+        return cells_df, signal_masks_out
+
+
+    def calculate_cell_signals(self, channels, dilate=None, mode="mean"):
+        """Extracts the mean signal of each cell in the input image(s) for multiple channels based on the masks.
+        Will populate the signal_dicts, signal_lists and signal_masks attributes.
+
+        Parameters:
+            channels : dict
+                A dictionary with channel names as keys and channel numbers as values, indicating which channels to use for the signal calculation.
+            dilate : int or dict
+                The amount of dilation to apply to the masks before calculating the mean signal for each channel.
+                If negative, erosion is applied instead of dilation. If a single int is given, it is applied to all channels. If a dict is given, it should have the same keys as channels, with the corresponding dilation values.
+            mode: str or dict
+                The mode used to calculate the representative signal for each cell. If a single str is given, it is applied to all channels. If a dict is given, it should have the same keys as channels, with the corresponding mode values.
+                Default = "mean"; "perc_X" means X-th percentile
+
+        Returns:
+            cells_df : pd.DataFrame
+                The cells DataFrame with the calculated representative signal of each cell in the image(s) for each channel.
+            signal_masks : dict
+                A dictionary with channel names as keys and lists of np.arrays as values, where each list contains the masks of the signals in each image for the corresponding channel, with the same shape as the input images.
+        """
+        # Perform checks
+        if isinstance(dilate, int) or dilate is None:
+            dilate = {name: dilate for name in channels.keys()}
+        elif not all([k in channels.keys() for k in dilate.keys()]):
+            raise ValueError('dilate must be a dict with the same keys as channels, or a single int to use for all channels.')
+
+        if isinstance(mode, str):
+            mode = {name: mode for name in channels.keys()}
+        elif not all([k in channels.keys() for k in mode.keys()]):
+            raise ValueError('mode must be a dict with the same keys as channels, or a single str to use for all channels.')
+
+        for name in channels.keys():
+            print("Started analyzing signal", name, "with parameters: dilate =", dilate[name], ", mode =", mode[name])
+            self.calculate_single_cell_signal(channel_name=name, channel_num=channels[name], dilate=dilate[name], mode=mode[name])
+
+        return self.cells_df, self.signal_masks
+
+        # cells_df = self.cells_df.copy()
+        # for name, num in channels.items():
+        #     # Reduce the channel number by one (0-indexed)
+        #     num -= 1
+        #     # Prepare the empty containers
+        #     signal_dicts_out = []
+        #     signal_lists_out = []
+        #     signal_masks_out = []
+        #     for img, mask in zip(self.projections, self.masks):
+        #         # Extract the channel from the image
+        #         img = img[num]
+        #         # Prepare the empty containers
+        #         img_signal_dict = {} #{cell_id: np.mean(img[cell_mask_for_mean]) for cell_id in range(1, mask.max()+1)}
+        #         img_signal_list = [] #[val for k, val in img_signal_means_dict.items()]
+        #         img_signal_mask = np.zeros_like(img, dtype=np.float32)
+        #         # add the signal to the dict and mask
+        #         lowest_non_zero = mask[mask != 0].min()
+        #         for cell_id in range(lowest_non_zero, mask.max()+1):
+        #             cell_mask = mask == cell_id
+        #             cell_mask_for_signal = cell_mask.copy()
+        #             # Dilate or erode if needed
+        #             if dilate[name] > 0:
+        #                 cell_mask_for_signal = morphology.binary_dilation(cell_mask_for_signal, morphology.disk(dilate[name]))
+        #             elif dilate[name] < 0:
+        #                 cell_mask_for_signal = morphology.binary_erosion(cell_mask_for_signal, morphology.disk(-dilate[name]))
+        #             # Calculate the mean or median signal for the cell
+        #             if mode[name] == "mean":
+        #                 cell_signal = np.mean(img[cell_mask_for_signal])
+        #             elif mode[name] == "median":
+        #                 cell_signal = np.median(img[cell_mask_for_signal])
+        #             elif "perc_" in mode[name]:
+        #                 perc = int(mode[name].split("_")[-1])
+        #                 cell_signal = np.percentile(img[cell_mask_for_signal], perc)
+        #             else:
+        #                 raise ValueError(f"Mode '{mode[name]}' not recognized. Check docstring for options.")
+        #             # Assign the signal to the cell ID in the dict and mask
+        #             if np.isnan(cell_signal):
+        #                 cell_signal = 0
+        #             img_signal_dict[cell_id] = cell_signal
+        #             img_signal_list.append(cell_signal)
+        #             img_signal_mask += cell_signal * cell_mask # NOTE: use un-altered mask here to have no overlaps between cells
+
+        #             # Add the signal to the cell_df
+        #             cells_df.loc[cell_id, name+"_"+mode[name]] = cell_signal
+        #             # Also add the log10 of the signal
+        #             cells_df.loc[cell_id, name+"_"+mode[name]+"_log10"] = np.log10(cell_signal) if cell_signal > 0 else 0
+
+        #         signal_dicts_out.append(img_signal_dict)
+        #         signal_lists_out.append(img_signal_list)
+        #         signal_masks_out.append(img_signal_mask)
+        
+        #     self.signal_dicts[name] = signal_dicts_out
+        #     self.signal_lists[name] = signal_lists_out
+        #     self.signal_masks[name] = signal_masks_out
+
+        # # Save the cells_df in the object
+        # self.cells_df = cells_df
+
+        # return self.cells_df, self.signal_masks
     
     def save_signal_masks(self, folder_name="signal_masks", overwrite=False, norm_per_img=False):
         """
